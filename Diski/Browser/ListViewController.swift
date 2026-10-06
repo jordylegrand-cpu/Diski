@@ -459,7 +459,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
             header.indent = Prefs.rowDensity.iconSize - 7.5
             tableColumn.headerCell = header
         }
-        tableColumn.headerCell.alignment = column.alignment
+        // Finder left-aligns every title, even over right-aligned sizes.
+        tableColumn.headerCell.alignment = .left
         tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
                                                                ascending: column.sortKey.defaultAscending)
         // Name always fills the row: widen it by narrowing the other columns.

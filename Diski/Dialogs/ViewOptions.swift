@@ -34,7 +34,6 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
             content.widthAnchor.constraint(equalToConstant: 270),
         ])
         panel.contentView = content
-        panel.setFrameAutosaveName("DiskiViewOptions")
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, self.window?.isVisible == true,
@@ -57,12 +56,36 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
             return
         }
         attach(to: pane)
-        if window?.isVisible != true, UserDefaults.standard.string(forKey: "NSWindow Frame DiskiViewOptions") == nil,
-           let browser = pane.view.window, let window {
-            window.setFrameTopLeftPoint(NSPoint(x: browser.frame.maxX + 12 - window.frame.width / 3,
-                                                y: browser.frame.maxY - 40))
-        }
+        if window?.isVisible != true { place(near: pane.view.window) }
         window?.orderFront(nil)
+    }
+
+    private static let positionKey = "DiskiViewOptionsTopLeft"
+
+    /// Where the user last left it, else at the browser's top right corner.
+    private func place(near browser: NSWindow?) {
+        guard let window else { return }
+        if let saved = UserDefaults.standard.string(forKey: Self.positionKey) {
+            let topLeft = NSPointFromString(saved)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.contains(topLeft) }) {
+                window.setFrameTopLeftPoint(topLeft)
+                return
+            }
+        }
+        guard let browser, let screen = browser.screen ?? NSScreen.main else {
+            window.center()
+            return
+        }
+        let visible = screen.visibleFrame
+        let x = min(browser.frame.maxX - window.frame.width - 16, visible.maxX - window.frame.width - 8)
+        let y = min(browser.frame.maxY - 70, visible.maxY - 8)
+        window.setFrameTopLeftPoint(NSPoint(x: max(visible.minX + 8, x).rounded(), y: y.rounded()))
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window, window.isVisible, NSEvent.pressedMouseButtons != 0 else { return }
+        UserDefaults.standard.set(NSStringFromPoint(NSPoint(x: window.frame.minX, y: window.frame.maxY)),
+                                  forKey: Self.positionKey)
     }
 
     /// Follows the active pane (window, tab, dual pane or view mode changes).

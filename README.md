@@ -43,12 +43,14 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
 - **Four views** — Icons, List (with inline folder disclosure), Columns, and Gallery with a live Quick Look preview and filmstrip.
 - **Liquid Glass toolbar** — back/forward, AirDrop, view switcher, sort & view options, share, tags, actions and search, exactly where you expect them.
 - **Sidebar** — Favorites (drag folders in, reorder, remove), iCloud Drive, Home, volumes with eject buttons and free-space tooltips, AirDrop, Network, Trash and Tags.
-- **Preview pane** — big preview, kind & size, created / modified / last opened, dimensions, duration, editable tags, and a "More…" section with permissions, version, where-from and exact sizes.
+- **Preview pane** — the native inspector pane: big preview, kind & size, created / modified / last opened, dimensions, duration, editable tags, and a "More…" section with permissions, version, where-from and exact sizes.
+- **Get Info** (⌘I) — a native Info window per item: General, More Info, Name & Extension (rename, hide extension), Open with (and Change All…), Preview, Sharing & Permissions, Locked and tags.
 - **Path bar and item info** — clickable path, item count, selection size and free space.
 - **Tabs and windows** — ⌘T / ⌘N, tab bar, merge windows; your windows, tabs and folders come back when you relaunch.
 - **All the file actions** — open, open with, Quick Look, rename (Return, like Finder), duplicate, aliases, compress, tags, share, move to Trash, put back, delete immediately, empty Trash, eject, and undo for copies, moves, renames, new items and trashing.
 - **Drag and drop** everywhere — between views, panes, windows, the sidebar, folders in the path bar and other apps (including file promises from Mail and Photos). ⌥ copies, ⌘ moves, ⌥⌘ makes an alias, and in the list, hovering over a folder springs it open. Drag to the Dock's Trash to delete.
-- **View Options** (⌘J) — sort order, folders on top, hidden files, folder sizes, thumbnails, row and icon size. Date columns switch to longer formats as you widen them, like Finder.
+- **View Options** (⌘J) — Finder's floating panel that follows the active window: sort order, Show Columns, icon size, folders on top, hidden files, folder sizes, icon previews and Use as Defaults. Date columns switch to longer formats as you widen them, like Finder.
+- **Native everywhere** — the progress window, alerts, popovers, sheets and panels are the system's own AppKit components; on macOS 27 the sidebar is the new edge-to-edge one, exactly like Finder's.
 
 ## Everything Finder is missing
 
@@ -58,8 +60,8 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
 - **Go to Folder** with live path completion and fuzzy matching on recent folders (⇧⌘G).
 - **New Text File** (⌥⌘N), **Copy Path** (⌥⌘C), **Open in Terminal** (Terminal, iTerm, Ghostty or Warp), **Make Symbolic Link**.
 - **Paste images and text as files** — copy a screenshot, press ⌘V in a folder, get `Pasted Image.png`.
-- **Smarter conflicts** — Keep Both, Replace, Merge, Skip or Stop with a side-by-side comparison ("Newer", "Larger"). Replaced items go to the Trash, so nothing is ever lost.
-- **Progress you can trust** — live speed, time remaining, pause/resume and stop in a toolbar progress ring, plus a small glass confirmation when an operation finishes ("Copied 3 items in 0.04 s · instant APFS clone").
+- **Smarter conflicts** — a native alert with Keep Both, Replace, Merge, Skip or Stop, Apply to All and a side-by-side comparison ("Newer", "Larger"). Replaced items go to the Trash, so nothing is ever lost.
+- **Progress you can trust** — Finder's Copy window with live speed, time remaining, pause/resume and stop for every operation, a progress indicator in the toolbar, and a short native confirmation for operations too quick to show a window ("Done in 0.01 s — instant APFS clone").
 - **Folder sizes** in the list, hidden files with one shortcut (⇧⌘.), keep folders on top, row density, full path in the title.
 
 ## A closer look
@@ -103,7 +105,7 @@ Help › Diski Keyboard Shortcuts (⇧⌘/) shows the full list.
 
 ## Build
 
-Requirements: macOS 26 or later, Xcode 26 or later.
+Requirements: macOS 26 or later, Xcode 26 or later (build with Xcode 27 for macOS 27's look).
 
 ```sh
 git clone https://github.com/jordylegrand-cpu/Diski.git
@@ -112,7 +114,7 @@ open Diski/Diski.xcodeproj   # then ⌘R
 
 Diski is not sandboxed (a file manager needs to see your files). The first time it opens Desktop, Documents or Downloads macOS asks for permission; for the Trash and other protected folders, turn on **Full Disk Access** for Diski in System Settings › Privacy & Security.
 
-Every push is built, tested, launched and screenshotted on a macOS 26 runner by GitHub Actions (`.github/workflows/build.yml`); the app and the screenshots are attached to each run.
+Every push is built with Xcode 27, tested, launched and screenshotted on a macOS 27 runner by GitHub Actions (`.github/workflows/build.yml`); the app and the screenshots are attached to each run.
 
 ## Architecture
 
@@ -125,8 +127,8 @@ Diski/
   Browser/      BrowserWindowController (toolbar, tabs, dual pane, Quick Look), PaneViewController
                 (navigation, actions, drag & drop), List / Icon / Column / Gallery view controllers
   Sidebar/      Favorites, locations, volumes, tags
-  Inspector/    Preview pane (SwiftUI)
-  Dialogs/      Go to Folder, Connect to Server, View Options
+  Inspector/    Preview pane, Get Info windows
+  Dialogs/      Go to Folder, Connect to Server, View Options panel
   Settings/     Settings window and speed test
 DiskiTests/     Engine tests: listings vs FileManager, natural sort, copy correctness, conflicts, sizes
 ```

@@ -77,6 +77,8 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         controllers[path] = controller
         controller.place()
         controller.showWindow(nil)
+        // Nothing is focused at first, like Finder's Info windows.
+        controller.window?.makeFirstResponder(nil)
     }
 
     private var item: FileItem
@@ -432,11 +434,15 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         let content = NSRect(x: 0, y: 0, width: Self.width, height: height)
         var frame = window.frameRect(forContentRect: content)
         frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        // Keep the whole window on screen: move it up when it grows past the bottom.
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame, frame.minY < visible.minY {
+            frame.origin.y = visible.minY
+        }
         window.setFrame(frame, display: true, animate: animate && window.isVisible)
     }
 
     /// Cascades from the key window's top-left, like Finder's Info windows.
-    private func place() {
+    fileprivate func place() {
         guard let window else { return }
         let others = Self.controllers.values.compactMap { $0 === self ? nil : $0.window }.filter { $0.isVisible }
         if let last = others.last {
@@ -447,6 +453,7 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         } else {
             window.center()
         }
+        fitWindow(animate: false)
     }
 
     // MARK: Actions

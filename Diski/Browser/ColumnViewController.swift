@@ -131,7 +131,7 @@ final class ColumnPreviewView: NSView {
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
         ])
         title.stringValue = item.name
-        let size = item.displaySize >= 0 ? " – " + Formatters.size(item.displaySize) : ""
+        let size = item.displaySize >= 0 ? " - " + Formatters.size(item.displaySize) : ""
         subtitle.stringValue = FileKinds.kind(for: item) + size
         info.stringValue = "Created \(Formatters.longDate(item.createdDate))\nModified \(Formatters.longDate(item.modifiedDate))"
         loader.load(item, into: image, points: 180, thumbnails: true)

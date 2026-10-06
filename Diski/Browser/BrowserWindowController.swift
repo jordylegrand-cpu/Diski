@@ -137,6 +137,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebarItem.minimumThickness = 172
         sidebarItem.maximumThickness = 320
         sidebarItem.canCollapse = true
+        // Finder's sidebar has no line under the title bar.
+        sidebarItem.titlebarSeparatorStyle = .none
         let contentItem = NSSplitViewItem(viewController: paneContainer)
         contentItem.minimumThickness = 360
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
@@ -534,6 +536,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             return true
         case #selector(toggleStatusInfo(_:)):
             menuItem.title = Prefs.showStatusInfo ? "Hide Item Info" : "Show Item Info"
+            return true
+        case #selector(showViewOptions(_:)):
+            menuItem.title = ViewOptionsPanel.shared.window?.isVisible == true ? "Hide View Options" : "Show View Options"
             return true
         case #selector(toggleDualPane(_:)):
             menuItem.title = isDualPane ? "Close Second Pane" : "Open Second Pane"

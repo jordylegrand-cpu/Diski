@@ -22,7 +22,6 @@ final class InspectorRowView: NSView {
         label.stringValue = row.label
         label.textColor = .secondaryLabelColor
         label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
         value.stringValue = row.value
         value.alignment = .right
         value.isSelectable = true
@@ -30,7 +29,10 @@ final class InspectorRowView: NSView {
         value.maximumNumberOfLines = multiline ? 3 : 1
         value.lineBreakMode = multiline ? .byCharWrapping : .byTruncatingMiddle
         value.cell?.truncatesLastVisibleLine = true
-        value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Below the split view's holding priority: long values truncate
+        // instead of widening the pane.
+        value.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
+        label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(210), for: .horizontal)
         line.translatesAutoresizingMaskIntoConstraints = false
         line.isHidden = !separator
         addSubview(line)
@@ -110,11 +112,11 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
 
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.textColor = .tertiaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
-        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
 
         compactPreview.imageScaling = .scaleProportionallyUpOrDown
         compactPreview.translatesAutoresizingMaskIntoConstraints = false
@@ -135,25 +137,28 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         tagField.focusRingType = .none
         tagField.tokenStyle = .rounded
         tagField.delegate = self
+        tagField.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         (tagField.cell as? NSTokenFieldCell)?.placeholderAttributedString = NSAttributedString(
             string: "Add Tags…", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.tertiaryLabelColor])
 
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 11, bottom: 16, right: 10)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 16, right: 9)
         stack.translatesAutoresizingMaskIntoConstraints = false
         for view in [previewBox, compactHeader, titleLabel, subtitleLabel, infoHeader, rowsStack, tagsHeader, tagField] as [NSView] {
             stack.addArrangedSubview(view)
         }
         for view in [previewBox, rowsStack, tagField, titleLabel, subtitleLabel] as [NSView] {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
         }
+        // Finder's spacing, measured.
+        stack.setCustomSpacing(15, after: previewBox)
         stack.setCustomSpacing(2, after: titleLabel)
-        stack.setCustomSpacing(8, after: subtitleLabel)
+        stack.setCustomSpacing(7, after: subtitleLabel)
         stack.setCustomSpacing(3, after: infoHeader)
-        stack.setCustomSpacing(12, after: rowsStack)
-        stack.setCustomSpacing(2, after: tagsHeader)
+        stack.setCustomSpacing(11, after: rowsStack)
+        stack.setCustomSpacing(4.5, after: tagsHeader)
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -186,7 +191,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             preview.centerXAnchor.constraint(equalTo: previewBox.centerXAnchor),
             preview.centerYAnchor.constraint(equalTo: previewBox.centerYAnchor),
             {
-                let fill = preview.widthAnchor.constraint(equalTo: previewBox.widthAnchor, constant: -14)
+                let fill = preview.widthAnchor.constraint(equalTo: previewBox.widthAnchor)
                 fill.priority = .defaultHigh
                 return fill
             }(),
@@ -240,10 +245,10 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             if titleLabel.superview !== stack {
                 stack.insertArrangedSubview(titleLabel, at: 2)
                 stack.insertArrangedSubview(subtitleLabel, at: 3)
-                titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
-                subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
+                titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
+                subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
                 stack.setCustomSpacing(2, after: titleLabel)
-                stack.setCustomSpacing(8, after: subtitleLabel)
+                stack.setCustomSpacing(7, after: subtitleLabel)
             }
             stack.edgeInsets.top = 0
         }
@@ -342,7 +347,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         var parts: [String] = []
         if folders > 0 { parts.append(Formatters.count(folders, "folder")) }
         if items.count - folders > 0 { parts.append(Formatters.count(items.count - folders, "file")) }
-        subtitleLabel.stringValue = parts.joined(separator: ", ") + (total > 0 ? " – " + Formatters.size(total) : "")
+        subtitleLabel.stringValue = parts.joined(separator: ", ") + (total > 0 ? " - " + Formatters.size(total) : "")
         setImage(NSWorkspace.shared.icon(forFiles: items.prefix(32).map { $0.path }) ?? IconCache.shared.immediateIcon(for: items[0]))
         let modified = items.map { $0.modified }.max() ?? 0
         setRows([InfoRow(label: "Latest change", value: Formatters.longDate(Date(timeIntervalSince1970: modified)))], more: [])
@@ -353,7 +358,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         titleLabel.stringValue = item.name
         let kind = FileKinds.kind(for: item)
         let size = item.displaySize
-        subtitleLabel.stringValue = size >= 0 ? "\(kind) – \(Formatters.size(size))" : kind
+        subtitleLabel.stringValue = size >= 0 ? "\(kind) - \(Formatters.size(size))" : kind
         setImage(IconCache.shared.cachedItemIcon(path: item.path) ?? IconCache.shared.immediateIcon(for: item))
         setRows([
             InfoRow(label: "Created", value: Formatters.longDate(item.createdDate)),
@@ -374,10 +379,10 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             if let cached = FolderSizer.shared.cached(item.path) {
                 applyFolderSize(cached, to: item, kind: kind)
             } else {
-                subtitleLabel.stringValue = "\(kind) – Calculating…"
+                subtitleLabel.stringValue = "\(kind) - Calculating…"
                 FolderSizer.shared.size(of: item.path, progress: { [weak self] bytes in
                     guard let self, token == self.token else { return }
-                    self.subtitleLabel.stringValue = "\(kind) – \(Formatters.size(bytes))…"
+                    self.subtitleLabel.stringValue = "\(kind) - \(Formatters.size(bytes))…"
                 }, completion: { [weak self] result in
                     guard let self, token == self.token else { return }
                     item.computedFolderSize = result.bytes
@@ -447,7 +452,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     }
 
     private func applyFolderSize(_ result: FolderSizer.Result, to item: FileItem, kind: String) {
-        subtitleLabel.stringValue = "\(kind) – \(Formatters.size(result.bytes))"
+        subtitleLabel.stringValue = "\(kind) - \(Formatters.size(result.bytes))"
         var more = moreRows.filter { $0.label != "Size" && $0.label != "Contains" }
         more.insert(InfoRow(label: "Size", value: Formatters.preciseSize(result.bytes)), at: 0)
         more.insert(InfoRow(label: "Contains", value: Formatters.count(result.items, "item")), at: 1)

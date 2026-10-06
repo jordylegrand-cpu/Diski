@@ -248,7 +248,6 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
             content.widthAnchor.constraint(equalToConstant: 460),
         ])
         panel.contentView = content
-        panel.setFrameAutosaveName("DiskiProgressWindow")
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(operationsChanged), name: FileOperationManager.didChange, object: nil)
@@ -364,17 +363,33 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
         window.setFrame(frame, display: true, animate: window.isVisible)
     }
 
-    /// First appearance: centered horizontally over the browser, near its top.
+    private static let positionKey = "DiskiProgressWindowTopLeft"
+
+    /// Where the user last left the window, else centered over the browser
+    /// near its top, like Finder's.
     private func place() {
         guard let window, !window.isVisible else { return }
-        if UserDefaults.standard.string(forKey: "NSWindow Frame DiskiProgressWindow") != nil { return }
+        if let saved = UserDefaults.standard.string(forKey: Self.positionKey) {
+            let topLeft = NSPointFromString(saved)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.contains(topLeft) }) {
+                window.setFrameTopLeftPoint(topLeft)
+                return
+            }
+        }
         if let browser = NSApp.mainWindow ?? NSApp.keyWindow, browser !== window {
             let x = browser.frame.midX - window.frame.width / 2
-            let y = browser.frame.maxY - 140 - window.frame.height
-            window.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
+            window.setFrameTopLeftPoint(NSPoint(x: x.rounded(), y: (browser.frame.maxY - 120).rounded()))
         } else {
             window.center()
         }
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window, window.isVisible, window.inLiveResize == false,
+              NSEvent.pressedMouseButtons != 0 else { return }
+        // Only moves made by dragging the title bar are remembered.
+        UserDefaults.standard.set(NSStringFromPoint(NSPoint(x: window.frame.minX, y: window.frame.maxY)),
+                                  forKey: Self.positionKey)
     }
 
     private static func title(for operations: [FileOperation]) -> String {
@@ -529,7 +544,8 @@ enum ConflictDialog {
         alert.alertStyle = .warning
         alert.icon = incoming.icon
         alert.messageText = "An item named “\(source.lastPathComponent)” already exists in this location."
-        alert.informativeText = "Do you want to replace it with the one you’re \(verb)? The replaced item goes to the Trash."
+        alert.informativeText = "Do you want to replace it with the one you’re \(verb)? The replaced item goes to the Trash.\n\n"
+            + describe("Existing", current, comparedTo: incoming) + "\n" + describe("New", incoming, comparedTo: current)
         var choices: [ConflictResolution] = [.keepBoth, .replace]
         alert.addButton(withTitle: "Keep Both")
         alert.addButton(withTitle: "Replace")
@@ -546,7 +562,6 @@ enum ConflictDialog {
             alert.showsSuppressionButton = true
             alert.suppressionButton?.title = "Apply to All"
         }
-        alert.accessoryView = comparison(existing: current, incoming: incoming)
 
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
@@ -561,41 +576,15 @@ enum ConflictDialog {
         }
     }
 
-    /// Existing and new item side by side: modification date and size, with
-    /// the newer and the larger one marked.
-    private static func comparison(existing: ConflictItemInfo, incoming: ConflictItemInfo) -> NSView {
-        func label(_ text: String, size: CGFloat = 11, weight: NSFont.Weight = .regular,
-                   color: NSColor = .labelColor) -> NSTextField {
-            let field = NSTextField(labelWithString: text)
-            field.font = .systemFont(ofSize: size, weight: weight)
-            field.textColor = color
-            field.lineBreakMode = .byTruncatingTail
-            return field
-        }
-        func column(_ title: String, _ info: ConflictItemInfo, _ other: ConflictItemInfo) -> NSStackView {
-            let newer = (info.modified ?? .distantPast) > (other.modified ?? .distantPast)
-            let larger = (info.size ?? 0) > (other.size ?? 0)
-            var views: [NSView] = [label(title, weight: .semibold, color: .secondaryLabelColor)]
-            views.append(label(info.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .short) } ?? "--"))
-            views.append(label(info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--")))
-            var marks: [String] = []
-            if newer { marks.append("Newer") }
-            if larger { marks.append("Larger") }
-            views.append(label(marks.isEmpty ? " " : marks.joined(separator: " · "), size: 10, weight: .semibold,
-                               color: .controlAccentColor))
-            let stack = NSStackView(views: views)
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 2
-            return stack
-        }
-        let row = NSStackView(views: [column("Existing", existing, incoming), column("New", incoming, existing)])
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.distribution = .fillEqually
-        row.spacing = 12
-        row.frame = NSRect(x: 0, y: 0, width: 230, height: 64)
-        return row
+    /// "Existing: Today, 6:59 PM · 2.1 GB (newer)".
+    private static func describe(_ title: String, _ info: ConflictItemInfo, comparedTo other: ConflictItemInfo) -> String {
+        var parts = [info.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .medium) } ?? "--"]
+        parts.append(info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--"))
+        var marks: [String] = []
+        if (info.modified ?? .distantPast) > (other.modified ?? .distantPast) { marks.append("newer") }
+        if (info.size ?? 0) > (other.size ?? 0) { marks.append("larger") }
+        let suffix = marks.isEmpty ? "" : " (" + marks.joined(separator: ", ") + ")"
+        return "\(title): " + parts.joined(separator: " · ") + suffix
     }
 }
 
