@@ -34,7 +34,7 @@ jobs:
             -destination 'platform=macOS' -derivedDataPath build \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
             build 2>&1 | tee build.log | grep -E "error:|BUILD|\*\*" || true
-          test -d build/Build/Products/Release/Diski.app
+          grep -q "BUILD SUCCEEDED" build.log
           ls -la build/Build/Products/Release/Diski.app/Contents/Resources || true
 
       - name: Show build errors

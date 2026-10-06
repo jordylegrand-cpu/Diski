@@ -24,9 +24,18 @@ final class PaneContainerViewController: NSViewController {
     private(set) var panes: [PaneViewController] = []
 
     override func loadView() {
+        let root = NSView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
-        view = splitView
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(splitView)
+        NSLayoutConstraint.activate([
+            splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: root.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        view = root
     }
 
     func add(_ pane: PaneViewController) {
@@ -149,12 +158,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     private func installToast() {
-        guard let content = window?.contentView else { return }
+        let container = paneContainer.view
         toast.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(toast, positioned: .above, relativeTo: nil)
+        container.addSubview(toast, positioned: .above, relativeTo: nil)
         NSLayoutConstraint.activate([
-            toast.centerXAnchor.constraint(equalTo: paneContainer.view.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -40),
+            toast.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            toast.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -40),
         ])
     }
 
@@ -288,8 +297,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private func updateWindowTitle() {
         guard let window else { return }
-        window.title = activePane.title
-        let name = activePane.isSearchResults ? activePane.title : FileManager.default.displayName(atPath: activePane.displayedPath)
+        window.title = activePane.displayTitle
+        let name = activePane.isSearchResults ? activePane.displayTitle : FileManager.default.displayName(atPath: activePane.displayedPath)
         window.tab.title = name
     }
 

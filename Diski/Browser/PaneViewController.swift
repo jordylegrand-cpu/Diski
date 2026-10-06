@@ -159,7 +159,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
 
     // MARK: - Navigation
 
-    var title: String {
+    var displayTitle: String {
         if isSearchResults {
             if let tag = searchTag { return tag }
             return "Searching “\(searchText)”"
@@ -730,7 +730,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             let folder = try FileOperationManager.shared.newFolder(in: directory)
             selectSoon(folder.path, rename: true)
         } catch {
-            presentError(error)
+            showError(error)
         }
     }
 
@@ -742,7 +742,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             let folder = try FileOperationManager.shared.newFolder(in: directory, containing: selection)
             selectSoon(folder.path, rename: true)
         } catch {
-            presentError(error)
+            showError(error)
         }
     }
 
@@ -753,7 +753,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             let file = try FileOperationManager.shared.newFile(in: directory)
             selectSoon(file.path, rename: true)
         } catch {
-            presentError(error)
+            showError(error)
         }
     }
 
@@ -781,7 +781,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             DirectoryStore.shared.reload(paths: [item.parentPath])
             return true
         } catch {
-            presentError(error)
+            showError(error)
             return false
         }
     }
@@ -939,7 +939,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
                     NSSound.beep()
                 }
             } catch {
-                presentError(error)
+                showError(error)
             }
             return
         }
@@ -1016,7 +1016,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         guard let volume = target, !volume.isRoot else { NSSound.beep(); return }
         if displayedPath.hasPrefix(volume.path) { navigate(to: NSHomeDirectory()) }
         VolumeMonitor.shared.eject(volume) { [weak self] error in
-            if let error { self?.presentError(error) }
+            if let error { self?.showError(error) }
         }
     }
 
@@ -1341,7 +1341,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
 
     // MARK: - Errors
 
-    func presentError(_ error: Error) {
+    func showError(_ error: Error) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = error.localizedDescription

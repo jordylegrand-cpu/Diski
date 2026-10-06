@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let paths = pendingPaths
             pendingPaths = []
             open(paths: paths)
-        } else if controllers.isEmpty {
+        } else if controllers.isEmpty && (CIDriver.isEnabled || !restoreSession()) {
             let start = CIDriver.startPath ?? Prefs.newWindowPath
             let controller = makeWindow(path: FileManager.default.fileExists(atPath: start) ? start : NSHomeDirectory())
             controller.showWindow(nil)
@@ -46,6 +46,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if !CIDriver.isEnabled { saveSession() }
+    }
+
+    // MARK: Session restore (windows, tabs, folders, view modes)
+
+    private func saveSession() {
+        var groups: [[[String: Any]]] = []
+        var seen = Set<ObjectIdentifier>()
+        for controller in controllers {
+            guard let window = controller.window, window.isVisible || window.isMiniaturized,
+                  !seen.contains(ObjectIdentifier(window)) else { continue }
+            var group: [[String: Any]] = []
+            for tab in window.tabbedWindows ?? [window] {
+                seen.insert(ObjectIdentifier(tab))
+                guard let browser = tab.windowController as? BrowserWindowController else { continue }
+                group.append(["path": browser.activePane.displayedPath, "mode": browser.activePane.viewMode.rawValue])
+            }
+            if !group.isEmpty { groups.append(group) }
+        }
+        UserDefaults.standard.set(groups, forKey: "savedSession")
+    }
+
+    private func restoreSession() -> Bool {
+        guard let groups = UserDefaults.standard.array(forKey: "savedSession") as? [[[String: Any]]], !groups.isEmpty else {
+            return false
+        }
+        var restored = false
+        for group in groups {
+            var first: BrowserWindowController?
+            for entry in group {
+                guard let path = entry["path"] as? String, FileManager.default.fileExists(atPath: path) else { continue }
+                let mode = (entry["mode"] as? Int).flatMap { ViewMode(rawValue: $0) }
+                let controller = makeWindow(path: path, viewMode: mode)
+                if let first, let window = first.window, let tab = controller.window {
+                    window.addTabbedWindow(tab, ordered: .above)
+                } else {
+                    first = controller
+                }
+                controller.showWindow(nil)
+                restored = true
+            }
+            first?.window?.makeKeyAndOrderFront(nil)
+        }
+        return restored
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { newWindow(nil) }
