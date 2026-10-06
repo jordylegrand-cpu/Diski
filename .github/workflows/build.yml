@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -19,6 +19,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+
+      - name: Remove the temporary screenshots ref
+        if: github.event_name == 'push'
+        run: git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" :refs/diski-ci/shots || true
 
       - name: Environment
         run: |
