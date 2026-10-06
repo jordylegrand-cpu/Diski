@@ -20,6 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Remove the temporary screenshots ref
+        if: github.event_name == 'push'
+        run: git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" :refs/diski-ci/shots || true
+
       - name: Environment
         run: |
           sw_vers
@@ -87,17 +91,6 @@ jobs:
         with:
           name: screenshots
           path: shots/
-
-      # Temporary: lets the screenshots be reviewed from outside GitHub.
-      - name: Publish screenshots to a hidden ref
-        if: always() && github.event_name == 'push'
-        run: |
-          cd shots || exit 0
-          git init -q .
-          git checkout -q -b shots
-          git add -A
-          git -c user.name=diski-ci -c user.email=ci@diski.invalid commit -q -m "CI screenshots for ${GITHUB_SHA}" || exit 0
-          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" shots:refs/diski-ci/shots || echo "could not publish screenshots"
 
       - name: Package app
         run: |

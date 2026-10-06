@@ -23,26 +23,26 @@ Everything Finder does — and the things it should have done all along — with
 | Copying between drives | No "Preparing…" phase: folders are scanned while copying starts, files stream through **parallel workers**, big files bypass the page cache, sparse files stay sparse, and metadata is applied last. |
 | Folder sizes | Calculated in the background by a parallel, allocation-free scanner, shown right in the list and kept up to date while files change. |
 
-Measured on GitHub's (virtualized) macOS 26 runner by the CI for this repository:
+Measured on GitHub's (virtualized) macOS 27 runner by the CI for this repository:
 
 | | |
 | --- | --- |
-| Listing a folder of 3,000 files | **4.7 ms** — 7.4× faster than `FileManager` (34.7 ms) |
+| Listing a folder of 3,000 files | **3.7 ms** — 6.1× faster than `FileManager` (22.6 ms) |
 | Copying a 2.1 GB folder on the same drive | **0.01 s** — instant APFS clone |
-| Copying the same folder to another APFS volume (a RAM disk) | **4.3 s** — 488 MB/s (390–665 MB/s across runs) |
+| Copying the same folder to another APFS volume (a RAM disk) | **1.5 s** — 1.4 GB/s (0.96–1.4 GB/s across runs) |
 
 Settings › Speed has a built-in speed test that compares Diski's folder reading with the system's on your Mac.
 
 <p align="center">
-  <img src="docs/screenshots/clone.jpg" alt="An instant APFS clone of a 2.1 GB folder" width="440">
-  <img src="docs/screenshots/copy.jpg" alt="Copying 2.1 GB to another drive" width="440">
+  <img src="docs/screenshots/clone.jpg" alt="An instant APFS clone of a 2.1 GB folder, confirmed in a native popover" width="440">
+  <img src="docs/screenshots/copy.jpg" alt="Finder's Copy window after copying 2.1 GB to another drive" width="440">
 </p>
 
 ## Everything Finder does
 
 - **Four views** — Icons, List (with inline folder disclosure), Columns, and Gallery with a live Quick Look preview and filmstrip.
 - **Liquid Glass toolbar** — back/forward, AirDrop, view switcher, sort & view options, share, tags, actions and search, exactly where you expect them.
-- **Sidebar** — Favorites (drag folders in, reorder, remove), iCloud Drive, Home, volumes with eject buttons and free-space tooltips, AirDrop, Network, Trash and Tags.
+- **Sidebar** — Finder's own, edge to edge on macOS 27: Recents, Favorites (drag folders in, reorder, remove), iCloud Drive, Home, volumes with eject buttons and free-space tooltips, AirDrop, Network, Trash and Tags.
 - **Preview pane** — the native inspector pane: big preview, kind & size, created / modified / last opened, dimensions, duration, editable tags, and a "More…" section with permissions, version, where-from and exact sizes.
 - **Get Info** (⌘I) — a native Info window per item: General, More Info, Name & Extension (rename, hide extension), Open with (and Change All…), Preview, Sharing & Permissions, Locked and tags.
 - **Path bar and item info** — clickable path, item count, selection size and free space.
@@ -60,7 +60,7 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
 - **Go to Folder** with live path completion and fuzzy matching on recent folders (⇧⌘G).
 - **New Text File** (⌥⌘N), **Copy Path** (⌥⌘C), **Open in Terminal** (Terminal, iTerm, Ghostty or Warp), **Make Symbolic Link**.
 - **Paste images and text as files** — copy a screenshot, press ⌘V in a folder, get `Pasted Image.png`.
-- **Smarter conflicts** — a native alert with Keep Both, Replace, Merge, Skip or Stop, Apply to All and a side-by-side comparison ("Newer", "Larger"). Replaced items go to the Trash, so nothing is ever lost.
+- **Smarter conflicts** — a native alert with Keep Both, Replace, Merge, Skip or Stop, Apply to All, and both items compared ("newer", "larger"). Replaced items go to the Trash, so nothing is ever lost.
 - **Progress you can trust** — Finder's Copy window with live speed, time remaining, pause/resume and stop for every operation, a progress indicator in the toolbar, and a short native confirmation for operations too quick to show a window ("Done in 0.01 s — instant APFS clone").
 - **Folder sizes** in the list, hidden files with one shortcut (⇧⌘.), keep folders on top, row density, full path in the title.
 
@@ -78,6 +78,14 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
   <tr>
     <td><img src="docs/screenshots/dual.jpg" alt="Dual pane"><br><sub>Dual pane (⌘\)</sub></td>
     <td><img src="docs/screenshots/search.jpg" alt="Instant filter"><br><sub>Instant filter with search scopes</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/getinfo.jpg" alt="Get Info window"><br><sub>Get Info (⌘I)</sub></td>
+    <td><img src="docs/screenshots/viewoptions.jpg" alt="View Options panel"><br><sub>View Options (⌘J)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/conflict.jpg" alt="Conflict alert"><br><sub>Native conflict alert, with the Copy window behind it</sub></td>
+    <td><img src="docs/screenshots/sidebar-sizes.jpg" alt="Sidebar sizes"><br><sub>The sidebar follows the small, medium and large sidebar sizes</sub></td>
   </tr>
 </table>
 
