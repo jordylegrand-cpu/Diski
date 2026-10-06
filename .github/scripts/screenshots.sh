@@ -8,8 +8,13 @@ DEMO="$3"
 mkdir -p "$OUT"
 # Non-zero when Diski quit or crashed during a shot.
 FAILED=0
-# Let the Dock finish hiding, so the first window gets the full screen.
+# Let the Dock finish hiding, and launch once without a screenshot: the very
+# first window can open while the Dock is still on screen.
 sleep 3
+open -n -a "$APP" --args -DiskiCIMode YES -DiskiCIPath "$DEMO" >/dev/null 2>&1
+sleep 4
+pkill -x Diski 2>/dev/null
+sleep 0.6
 
 shoot() {
   local name="$1"; shift
