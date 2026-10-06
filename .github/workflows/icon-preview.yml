@@ -27,7 +27,7 @@ jobs:
         run: |
           mkdir -p out
           seen=""
-          for xcode in $(ls -d /Applications/Xcode*.app | sort -rV); do
+          for xcode in "$(dirname "$(dirname "$(xcode-select -p)")")"; do
             ictool="$xcode/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
             [ -x "$ictool" ] || continue
             ver=$("$ictool" --version | sed -n 's/.*"short-bundle-version" *: *"\([^"]*\)".*/\1/p')
