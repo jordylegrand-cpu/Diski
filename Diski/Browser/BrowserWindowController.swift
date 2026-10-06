@@ -167,6 +167,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         ])
     }
 
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        activePane.content.focus()
+    }
+
     func showToast(_ text: String, symbol: String = "bolt.fill") {
         toast.show(text, symbol: symbol)
     }
@@ -376,6 +381,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     override func newWindowForTab(_ sender: Any?) {
         (NSApp.delegate as? AppDelegate)?.openTab(path: activePane.displayedPath, from: self)
+    }
+
+    @objc func showViewOptions(_ sender: Any?) {
+        guard let window else { return }
+        ViewOptionsPopover.toggle(for: activePane, in: window)
     }
 
     @objc func showOperations(_ sender: Any?) {

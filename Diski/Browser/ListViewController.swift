@@ -299,7 +299,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         outlineView.headerView?.menu = headerMenu
         syncSortIndicator()
         fittedWidth = 0
-        view.needsLayout = true
+        if isViewLoaded { view.needsLayout = true }
     }
 
     func syncSortIndicator() {
@@ -683,10 +683,32 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let operation = pane.dragOperation(for: info, destination: destination)
         if operation.isEmpty { return [] }
         outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        springLoad(target)
         return operation
     }
 
+    /// Spring-loaded folders: hovering a drag over a folder expands it.
+    private var springTarget: FileItem?
+    private var springWork: DispatchWorkItem?
+
+    private func springLoad(_ target: FileItem?) {
+        guard target !== springTarget else { return }
+        springTarget = target
+        springWork?.cancel()
+        guard let target, target.type == .directory, !outlineView.isItemExpanded(target) else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.springTarget === target else { return }
+            NSAnimationContext.runAnimationGroup { _ in
+                self.outlineView.animator().expandItem(target)
+            }
+        }
+        springWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        springWork?.cancel()
+        springTarget = nil
         let destination = (item as? FileItem)?.path ?? directoryPath
         return pane?.performDrop(info, destination: destination) ?? false
     }

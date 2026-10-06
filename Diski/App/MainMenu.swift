@@ -115,6 +115,7 @@ enum MainMenu {
         sort.submenu = sortMenu
         view.addItem(sort)
         add(view, "Show Hidden Files", #selector(PaneViewController.toggleHiddenFiles(_:)), ".", [.command, .shift])
+        add(view, "Show View Options", #selector(BrowserWindowController.showViewOptions(_:)), "j")
         view.addItem(.separator())
         add(view, "Show Tab Bar", #selector(NSWindow.toggleTabBar(_:)), "t", [.command, .shift])
         add(view, "Show All Tabs", #selector(NSWindow.toggleTabOverview(_:)), "\\", [.command, .shift])

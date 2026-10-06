@@ -434,6 +434,14 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         content.display(items: items, directory: currentPath, changes: nil, reset: true)
         content.select(selection, scroll: true)
         content.focus()
+        // A quick crossfade makes the switch feel smooth without slowing it down.
+        let incoming = content.view
+        incoming.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            incoming.animator().alphaValue = 1
+        }
         updateBottomBar()
         delegate?.paneDidChangeViewMode(self)
         delegate?.paneDidChangeLocation(self)
