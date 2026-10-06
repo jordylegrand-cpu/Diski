@@ -126,11 +126,13 @@ final class NameCellView: NSTableCellView {
         textField = name
         iconWidth = icon.widthAnchor.constraint(equalToConstant: 26)
         iconHeight = icon.heightAnchor.constraint(equalToConstant: 26)
+        // Finder's metrics: the icon 13.5 pt into the row highlight, the name
+        // 7 pt after the icon.
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -1.5),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconWidth, iconHeight,
-            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
             tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 5),
             tags.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -184,6 +186,25 @@ final class NameCellView: NSTableCellView {
     override func prepareForReuse() {
         super.prepareForReuse()
         loader.cancel()
+    }
+}
+
+/// A column header whose title starts further in (the Name column's).
+final class IndentedHeaderCell: NSTableHeaderCell {
+    var indent: CGFloat = 0
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        var frame = cellFrame
+        frame.origin.x += indent
+        frame.size.width = max(0, frame.width - indent)
+        super.drawInterior(withFrame: frame, in: controlView)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        var frame = super.titleRect(forBounds: rect)
+        frame.origin.x += indent
+        frame.size.width = max(0, frame.width - indent)
+        return frame
     }
 }
 
@@ -244,7 +265,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         outlineView.autoresizesOutlineColumn = false
         outlineView.rowSizeStyle = .custom
         outlineView.rowHeight = density.rowHeight
-        outlineView.intercellSpacing = NSSize(width: 6, height: 4)
+        outlineView.intercellSpacing = NSSize(width: 6, height: 2)
         outlineView.dataSource = self
         outlineView.delegate = self
         outlineView.keyHandler = self
@@ -431,6 +452,13 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         tableColumn.width = column == .name ? column.defaultWidth : preferredWidths[column.rawValue] ?? column.defaultWidth
         tableColumn.minWidth = column.minWidth
         tableColumn.maxWidth = column == .name ? 4000 : 600
+        if column == .name {
+            // Finder starts the Name title over the end of the icons.
+            let header = IndentedHeaderCell(textCell: column.title)
+            header.font = tableColumn.headerCell.font
+            header.indent = Prefs.rowDensity.iconSize - 7.5
+            tableColumn.headerCell = header
+        }
         tableColumn.headerCell.alignment = column.alignment
         tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
                                                                ascending: column.sortKey.defaultAscending)
@@ -736,6 +764,11 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
     override func appearanceSettingsDidChange() {
         outlineView.rowHeight = Prefs.rowDensity.rowHeight
+        if let header = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue))?
+            .headerCell as? IndentedHeaderCell, header.indent != Prefs.rowDensity.iconSize - 7.5 {
+            header.indent = Prefs.rowDensity.iconSize - 7.5
+            outlineView.headerView?.needsDisplay = true
+        }
         let current = outlineView.tableColumns.compactMap { ListColumn(rawValue: $0.identifier.rawValue) }.filter { $0 != .name }
         let wanted = Prefs.listColumns.compactMap { ListColumn(rawValue: $0) }
         if Set(current) != Set(wanted) {

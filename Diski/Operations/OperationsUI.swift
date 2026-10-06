@@ -1,297 +1,603 @@
 import AppKit
-import SwiftUI
+import UniformTypeIdentifiers
 
-// MARK: - Toast
+// MARK: - Operation row
 
-/// A small Liquid Glass capsule that confirms what just happened.
-final class ToastView: NSView {
-    private let glass = NSGlassEffectView()
+/// One file operation, laid out like a row of Finder's Copy window:
+/// the item's icon, "Copying “X” to “Y”", a progress bar with pause and
+/// stop buttons, and "1.2 GB of 2.1 GB — 488 MB/s — About 2 seconds".
+final class OperationRowView: NSView {
+    let operation: FileOperation
     private let icon = NSImageView()
-    private let label = NSTextField(labelWithString: "")
-    private var generation = 0
+    private let title = NSTextField(labelWithString: "")
+    private let bar = NSProgressIndicator()
+    private let detail = NSTextField(labelWithString: "")
+    private let pauseButton = NSButton()
+    private let stopButton = NSButton()
+    private var detailBelowBar: NSLayoutConstraint!
+    private var detailBelowTitle: NSLayoutConstraint!
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        glass.translatesAutoresizingMaskIntoConstraints = false
-        glass.cornerRadius = 18
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-        icon.contentTintColor = .controlAccentColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 12.5, weight: .medium)
-        label.lineBreakMode = .byTruncatingMiddle
-        content.addSubview(icon)
-        content.addSubview(label)
-        glass.contentView = content
-        addSubview(glass)
+    init(operation: FileOperation) {
+        self.operation = operation
+        super.init(frame: NSRect(x: 0, y: 0, width: 460, height: 76))
+
+        icon.image = Self.icon(for: operation)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        title.font = .systemFont(ofSize: NSFont.systemFontSize)
+        title.lineBreakMode = .byTruncatingMiddle
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bar.style = .bar
+        bar.controlSize = .small
+        bar.minValue = 0
+        bar.maxValue = 1
+        bar.isIndeterminate = true
+        bar.startAnimation(nil)
+        for button in [pauseButton, stopButton] {
+            button.isBordered = false
+            button.bezelStyle = .regularSquare
+            button.imagePosition = .imageOnly
+            button.contentTintColor = .tertiaryLabelColor
+            button.target = self
+        }
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        stopButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Stop")?
+            .withSymbolConfiguration(symbolConfig)
+        stopButton.toolTip = "Stop"
+        stopButton.action = #selector(stop)
+        pauseButton.action = #selector(togglePause)
+        pauseButton.symbolConfiguration = symbolConfig
+
+        for view in [icon, title, bar, detail, pauseButton, stopButton] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        detailBelowBar = detail.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4)
+        detailBelowTitle = detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2)
         NSLayoutConstraint.activate([
-            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
-            glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glass.topAnchor.constraint(equalTo: topAnchor),
-            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            icon.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 7),
-            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            label.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            label.widthAnchor.constraint(lessThanOrEqualToConstant: 520),
-            heightAnchor.constraint(equalToConstant: 36),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 32),
+            icon.heightAnchor.constraint(equalToConstant: 32),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 13),
+            bar.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            bar.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
+            pauseButton.leadingAnchor.constraint(equalTo: bar.trailingAnchor, constant: 8),
+            pauseButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            stopButton.leadingAnchor.constraint(equalTo: pauseButton.trailingAnchor, constant: 4),
+            stopButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            stopButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            detail.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -13),
+            detailBelowBar,
         ])
-        alphaValue = 0
-        isHidden = true
+        update()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func show(_ text: String, symbol: String) {
-        generation += 1
-        let current = generation
-        label.stringValue = text
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        isHidden = false
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            animator().alphaValue = 1
+    private static func icon(for operation: FileOperation) -> NSImage {
+        switch operation.kind {
+        case .trash, .delete, .emptyTrash:
+            return NSImage(named: NSImage.trashFullName) ?? NSWorkspace.shared.icon(forFile: FileOperationManager.trashURL.path)
+        default:
+            if operation.sources.count == 1 { return NSWorkspace.shared.icon(forFile: operation.sources[0].path) }
+            return NSWorkspace.shared.icon(forFiles: operation.sources.map { $0.path }) ?? NSWorkspace.shared.icon(for: .data)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
-            guard let self, self.generation == current else { return }
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.25
-                self.animator().alphaValue = 0
-            }, completionHandler: {
-                if self.generation == current { self.isHidden = true }
-            })
+    }
+
+    func update() {
+        let done = operation.state.isDone
+        bar.isHidden = done
+        pauseButton.isHidden = done
+        stopButton.isHidden = done
+        detailBelowBar.isActive = !done
+        detailBelowTitle.isActive = done
+        if done {
+            bar.stopAnimation(nil)
+            title.stringValue = finishedTitle
+        } else {
+            title.stringValue = operation.title
+            let snapshot = operation.snapshot
+            let indeterminate = snapshot.scanning && snapshot.totalBytes == 0 && snapshot.totalItems == 0
+            if bar.isIndeterminate != indeterminate {
+                bar.isIndeterminate = indeterminate
+                if indeterminate { bar.startAnimation(nil) } else { bar.stopAnimation(nil) }
+            }
+            if !indeterminate { bar.doubleValue = operation.fractionCompleted }
+            let paused = operation.isPaused
+            pauseButton.image = NSImage(systemSymbolName: paused ? "play.circle.fill" : "pause.circle.fill",
+                                        accessibilityDescription: paused ? "Resume" : "Pause")
+            pauseButton.toolTip = paused ? "Resume" : "Pause"
+        }
+        detail.stringValue = detailText
+        if case .failed = operation.state {
+            detail.textColor = .systemRed
+        } else {
+            detail.textColor = .secondaryLabelColor
+        }
+    }
+
+    private var finishedTitle: String {
+        let count = operation.sources.count
+        let what = count == 1 ? "“\(operation.sources[0].lastPathComponent)”" : "\(count) items"
+        let running = operation.title.prefix(1).lowercased() + String(operation.title.dropFirst())
+        switch operation.state {
+        case .failed: return "Couldn’t finish \(running)"
+        case .cancelled: return "Stopped \(running)"
+        default: break
+        }
+        switch operation.kind {
+        case .copy, .move:
+            let target = operation.destination.map { " to “\(FileManager.default.displayName(atPath: $0.path))”" } ?? ""
+            return "\(operation.kind.pastTense) \(what)\(target)"
+        case .emptyTrash:
+            return "Emptied the Trash"
+        case .trash:
+            return "Moved \(what) to the Trash"
+        default:
+            return "\(operation.kind.pastTense) \(what)"
+        }
+    }
+
+    private var detailText: String {
+        let s = operation.snapshot
+        switch operation.state {
+        case .finished:
+            let elapsed = (operation.finishedAt ?? Date()).timeIntervalSince(operation.startedAt)
+            var parts = ["Done in \(Formatters.duration(elapsed))"]
+            if s.instant && (operation.kind == .copy || operation.kind == .duplicate) {
+                parts.append("instant APFS clone")
+            } else if s.totalBytes > 0 && elapsed > 0.05 && operation.kind != .trash {
+                parts.append("\(Formatters.rate(Double(s.totalBytes) / elapsed)) average")
+            }
+            if operation.kind == .trash { parts.append("⌘Z to undo") }
+            return parts.joined(separator: " — ")
+        case .failed(let message):
+            return message
+        case .cancelled:
+            return "Stopped"
+        default:
+            var parts: [String] = []
+            if s.totalBytes > 0 {
+                parts.append("\(Formatters.size(s.completedBytes)) of \(Formatters.size(s.totalBytes))\(s.scanning ? "+" : "")")
+            } else if s.totalItems > 0 {
+                parts.append("\(s.completedItems) of \(s.totalItems) items")
+            } else {
+                parts.append("Preparing…")
+            }
+            if operation.isPaused {
+                parts.append("Paused")
+            } else {
+                let rate = Formatters.rate(operation.bytesPerSecond)
+                if !rate.isEmpty { parts.append(rate) }
+                if let remaining = operation.estimatedSecondsRemaining { parts.append(Formatters.remaining(remaining)) }
+            }
+            return parts.joined(separator: " — ")
+        }
+    }
+
+    @objc private func togglePause() {
+        operation.setPaused(!operation.isPaused)
+        update()
+    }
+
+    @objc private func stop() {
+        operation.cancel()
+    }
+}
+
+/// A hairline between rows, one device pixel thick.
+final class HairlineView: NSView {
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 1) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let scale = window?.backingScaleFactor ?? 2
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: bounds.midY - 0.5 / scale, width: bounds.width, height: 1 / scale).fill()
+    }
+}
+
+// MARK: - Progress window
+
+/// Finder's "Copy" window: a native window listing the running operations.
+/// It opens by itself when an operation takes longer than a moment and
+/// closes when everything is done.
+final class ProgressWindowController: NSWindowController, NSWindowDelegate {
+    static let shared = ProgressWindowController()
+
+    private let stack = NSStackView()
+    private var rows: [ObjectIdentifier: OperationRowView] = [:]
+    /// Operations shown in the window; finished ones stay a moment with their result.
+    private var shown: [FileOperation] = []
+    private var lingering: Set<ObjectIdentifier> = []
+    private var dismissedByUser = false
+    /// Opened by the user: finished operations stay listed until it is closed.
+    private var pinned = false
+    private var pendingAutoShow: Set<ObjectIdentifier> = []
+
+    private init() {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 76),
+                            styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: true)
+        panel.title = "Copy"
+        panel.isFloatingPanel = false
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.fullScreenAuxiliary]
+        super.init(window: panel)
+        panel.delegate = self
+
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            content.widthAnchor.constraint(equalToConstant: 460),
+        ])
+        panel.contentView = content
+        panel.setFrameAutosaveName("DiskiProgressWindow")
+
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(operationsChanged), name: FileOperationManager.didChange, object: nil)
+        center.addObserver(self, selector: #selector(operationFinished(_:)), name: FileOperationManager.didFinish, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Whether the window was on screen while `operation` ran.
+    func didShow(_ operation: FileOperation) -> Bool {
+        rows[ObjectIdentifier(operation)] != nil && window?.isVisible == true
+    }
+
+    /// Shows the window with every running operation, and the results of the
+    /// ones that just finished (toolbar button, Window menu).
+    func present() {
+        dismissedByUser = false
+        pinned = true
+        for operation in FileOperationManager.shared.operations where operation.state.isDone {
+            lingering.insert(ObjectIdentifier(operation))
+        }
+        sync()
+        if shown.isEmpty {
+            pinned = false
+            NSSound.beep()
+            return
+        }
+        place()
+        window?.orderFront(nil)
+    }
+
+    @objc private func operationsChanged() {
+        let active = FileOperationManager.shared.activeOperations
+        if active.isEmpty { dismissedByUser = false }
+        // New operations open the window once they have run for half a second,
+        // like Finder (instant clones and renames never show it).
+        for operation in active where !pendingAutoShow.contains(ObjectIdentifier(operation))
+            && rows[ObjectIdentifier(operation)] == nil {
+            pendingAutoShow.insert(ObjectIdentifier(operation))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak operation] in
+                guard let self, let operation, !operation.state.isDone, !self.dismissedByUser else { return }
+                self.sync()
+                if self.window?.isVisible != true {
+                    self.place()
+                    self.window?.orderFront(nil)
+                }
+            }
+        }
+        if window?.isVisible == true { sync() }
+    }
+
+    @objc private func operationFinished(_ notification: Notification) {
+        guard let operation = notification.object as? FileOperation else { return }
+        let id = ObjectIdentifier(operation)
+        pendingAutoShow.remove(id)
+        guard let row = rows[id] else { return }
+        row.update()
+        lingering.insert(id)
+        guard !pinned else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (operation.state == .finished ? 1.6 : 4)) { [weak self] in
+            guard let self, !self.pinned else { return }
+            self.lingering.remove(id)
+            self.sync()
+        }
+    }
+
+    /// Rebuilds the rows: running operations plus finished ones still lingering.
+    private func sync() {
+        let manager = FileOperationManager.shared
+        // Finished operations leave the manager after a few seconds; a pinned
+        // window keeps showing them.
+        var wanted = manager.operations.filter { !$0.state.isDone || lingering.contains(ObjectIdentifier($0)) }
+        if pinned {
+            let listed = Set(wanted.map { ObjectIdentifier($0) })
+            wanted = shown.filter { lingering.contains(ObjectIdentifier($0)) && !listed.contains(ObjectIdentifier($0)) } + wanted
+        }
+        if wanted.map({ ObjectIdentifier($0) }) != shown.map({ ObjectIdentifier($0) }) {
+            shown = wanted
+            for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
+            var kept: [ObjectIdentifier: OperationRowView] = [:]
+            for (index, operation) in wanted.enumerated() {
+                let id = ObjectIdentifier(operation)
+                let row = rows[id] ?? OperationRowView(operation: operation)
+                kept[id] = row
+                if index > 0 {
+                    let line = HairlineView()
+                    line.translatesAutoresizingMaskIntoConstraints = false
+                    stack.addArrangedSubview(line)
+                    line.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+                }
+                row.translatesAutoresizingMaskIntoConstraints = false
+                stack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+            rows = kept
+            window?.title = Self.title(for: wanted)
+            resizeToFit()
+        }
+        for row in rows.values { row.update() }
+        if wanted.isEmpty, window?.isVisible == true {
+            window?.orderOut(nil)
+            dismissedByUser = false
+        }
+    }
+
+    private func resizeToFit() {
+        guard let window, let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let height = max(76, stack.fittingSize.height)
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: 460, height: height)))
+        // Grow and shrink downwards from the title bar.
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: window.isVisible)
+    }
+
+    /// First appearance: centered horizontally over the browser, near its top.
+    private func place() {
+        guard let window, !window.isVisible else { return }
+        if UserDefaults.standard.string(forKey: "NSWindow Frame DiskiProgressWindow") != nil { return }
+        if let browser = NSApp.mainWindow ?? NSApp.keyWindow, browser !== window {
+            let x = browser.frame.midX - window.frame.width / 2
+            let y = browser.frame.maxY - 140 - window.frame.height
+            window.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
+        } else {
+            window.center()
+        }
+    }
+
+    private static func title(for operations: [FileOperation]) -> String {
+        let kinds = Set(operations.map { $0.kind.windowTitle })
+        return kinds.count == 1 ? kinds.first! : "File Operations"
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        dismissedByUser = !FileOperationManager.shared.activeOperations.isEmpty
+        pinned = false
+        lingering.removeAll()
+        sender.orderOut(nil)
+        sync()
+        return false
+    }
+}
+
+private extension FileOperation.Kind {
+    var windowTitle: String {
+        switch self {
+        case .copy: return "Copy"
+        case .move: return "Move"
+        case .duplicate: return "Duplicate"
+        case .trash: return "Move to Trash"
+        case .delete: return "Delete"
+        case .compress: return "Compress"
+        case .emptyTrash: return "Empty Trash"
         }
     }
 }
 
-// MARK: - Toolbar progress ring
+// MARK: - Toolbar progress item
 
+/// The toolbar's progress item: a native circular progress indicator while
+/// operations run and a checkmark briefly afterwards. Click it to open the
+/// progress window.
 final class OperationsToolbarView: NSView {
     var onClick: (() -> Void)?
-    private var fraction: Double = 0
-    private var running = false
-    private var finished = false
+    private let indicator = NSProgressIndicator()
+    private let check = NSImageView()
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 30, height: 30))
+        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
         translatesAutoresizingMaskIntoConstraints = false
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = false
+        indicator.minValue = 0
+        indicator.maxValue = 1
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Done")
+        check.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        check.contentTintColor = .controlAccentColor
+        check.translatesAutoresizingMaskIntoConstraints = false
+        check.isHidden = true
+        addSubview(indicator)
+        addSubview(check)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 30),
-            heightAnchor.constraint(equalToConstant: 30),
+            widthAnchor.constraint(equalToConstant: 28),
+            heightAnchor.constraint(equalToConstant: 28),
+            indicator.centerXAnchor.constraint(equalTo: centerXAnchor),
+            indicator.centerYAnchor.constraint(equalTo: centerYAnchor),
+            check.centerXAnchor.constraint(equalTo: centerXAnchor),
+            check.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        toolTip = "File operations"
+        toolTip = "Show progress"
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Progress")
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func update(with operations: [FileOperation]) {
         let active = operations.filter { !$0.state.isDone }
-        running = !active.isEmpty
-        finished = !operations.isEmpty && active.isEmpty
-        if running {
-            let total = active.reduce(0.0) { $0 + $1.fractionCompleted }
-            fraction = total / Double(active.count)
-        } else {
-            fraction = finished ? 1 : 0
+        let finished = !operations.isEmpty && active.isEmpty
+        check.isHidden = !finished
+        indicator.isHidden = finished
+        if !active.isEmpty {
+            let fraction = active.reduce(0.0) { $0 + $1.fractionCompleted } / Double(active.count)
+            indicator.doubleValue = max(0.02, fraction)
         }
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 6, dy: 6)
-        let center = NSPoint(x: rect.midX, y: rect.midY)
-        let radius = rect.width / 2
-        let track = NSBezierPath()
-        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
-        track.lineWidth = 2.5
-        NSColor.quaternaryLabelColor.setStroke()
-        track.stroke()
-        if finished {
-            NSColor.controlAccentColor.setStroke()
-            track.stroke()
-            let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor]))
-            if let check = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
-                let size = check.size
-                check.draw(in: NSRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
-                                      width: size.width, height: size.height))
-            }
-            return
-        }
-        guard fraction > 0 else { return }
-        let arc = NSBezierPath()
-        arc.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: 90 - 360 * CGFloat(fraction), clockwise: true)
-        arc.lineWidth = 2.5
-        arc.lineCapStyle = .round
-        NSColor.controlAccentColor.setStroke()
-        arc.stroke()
     }
 
     override func mouseDown(with event: NSEvent) {
         onClick?()
     }
-}
 
-// MARK: - Operations popover
-
-final class OperationsModel: ObservableObject {
-    @Published var operations: [FileOperation] = []
-    @Published var tick = 0
-    private var observer: NSObjectProtocol?
-
-    init() {
-        operations = FileOperationManager.shared.operations
-        observer = NotificationCenter.default.addObserver(forName: FileOperationManager.didChange, object: nil,
-                                                          queue: .main) { [weak self] _ in
-            guard let self else { return }
-            self.operations = FileOperationManager.shared.operations
-            self.tick += 1
-        }
-    }
-
-    deinit {
-        if let observer { NotificationCenter.default.removeObserver(observer) }
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 }
 
-struct OperationsListView: View {
-    @ObservedObject var model: OperationsModel
+// MARK: - Finished confirmation
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if model.operations.isEmpty {
-                Text("No file operations")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(24)
-            } else {
-                ForEach(model.operations) { operation in
-                    OperationRow(operation: operation, tick: model.tick)
-                    if operation.id != model.operations.last?.id { Divider() }
-                }
-            }
-        }
-        .frame(width: 380)
-        .padding(.vertical, 6)
-    }
-}
-
-struct OperationRow: View {
-    let operation: FileOperation
-    let tick: Int
-
-    var body: some View {
-        let snapshot = operation.snapshot
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Image(systemName: symbol)
-                    .foregroundStyle(operation.state == .finished ? Color.green : Color.accentColor)
-                Text(operation.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                if !operation.state.isDone {
-                    Button {
-                        operation.setPaused(!operation.isPaused)
-                    } label: {
-                        Image(systemName: operation.isPaused ? "play.fill" : "pause.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .help(operation.isPaused ? "Resume" : "Pause")
-                    Button {
-                        operation.cancel()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help("Stop")
-                }
-            }
-            if !operation.state.isDone {
-                ProgressView(value: snapshot.scanning && snapshot.totalBytes == 0 ? nil : operation.fractionCompleted)
-                    .progressViewStyle(.linear)
-                    .controlSize(.small)
-            }
-            Text(detail(snapshot))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
-
-    private var symbol: String {
-        switch operation.state {
-        case .finished: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .cancelled: return "xmark.circle"
-        default:
-            switch operation.kind {
-            case .trash, .delete, .emptyTrash: return "trash"
-            case .compress: return "archivebox"
-            case .move: return "arrow.right.doc.on.clipboard"
-            default: return "doc.on.doc"
-            }
-        }
-    }
-
-    private func detail(_ s: FileOperation.Snapshot) -> String {
-        switch operation.state {
-        case .finished:
-            let elapsed = (operation.finishedAt ?? Date()).timeIntervalSince(operation.startedAt)
-            var text = "Done in \(Formatters.duration(elapsed))"
-            if s.instant && (operation.kind == .copy || operation.kind == .duplicate) { text += " · instant APFS clone" }
-            else if s.totalBytes > 0 && elapsed > 0.05 { text += " · \(Formatters.rate(Double(s.totalBytes) / elapsed)) average" }
-            return text
-        case .failed(let message):
-            return message
-        case .cancelled:
-            return "Stopped"
-        case .paused:
-            return "Paused"
-        default:
-            if operation.isPaused { return "Paused — \(Formatters.size(s.completedBytes)) of \(Formatters.size(s.totalBytes))" }
-            var parts: [String] = []
-            if s.totalBytes > 0 {
-                parts.append("\(Formatters.size(s.completedBytes)) of \(Formatters.size(s.totalBytes))\(s.scanning ? "+" : "")")
-            } else if s.totalItems > 0 {
-                parts.append("\(s.completedItems) of \(s.totalItems) items")
-            }
-            let rate = Formatters.rate(operation.bytesPerSecond)
-            if !rate.isEmpty { parts.append(rate) }
-            if let remaining = operation.estimatedSecondsRemaining { parts.append(Formatters.remaining(remaining)) }
-            if !s.currentName.isEmpty { parts.append(s.currentName) }
-            return parts.joined(separator: " · ")
-        }
-    }
-}
-
-enum OperationsPopover {
+/// A native popover under the toolbar's progress item confirming a finished
+/// operation that was too quick for the progress window ("Copied “X” in
+/// 0.01 s — instant APFS clone").
+enum OperationFinishedPopover {
     private static var popover: NSPopover?
+    private static var generation = 0
 
-    static func show(relativeTo view: NSView) {
-        if let popover, popover.isShown {
-            popover.performClose(nil)
-            return
-        }
+    static func show(_ operation: FileOperation, relativeTo view: NSView) {
+        popover?.close()
+        let controller = NSViewController()
+        let row = OperationRowView(operation: operation)
+        row.frame = NSRect(x: 0, y: 0, width: 380, height: 60)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView()
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor),
+            row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(equalToConstant: 380),
+        ])
+        controller.view = container
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: OperationsListView(model: OperationsModel()))
+        popover.animates = true
+        popover.contentViewController = controller
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
         self.popover = popover
+        generation += 1
+        let current = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            guard current == generation else { return }
+            popover.performClose(nil)
+        }
     }
 }
 
-// MARK: - Conflict dialog
+// MARK: - Conflicts
+
+/// "An item named “X” already exists in this location." — a native alert
+/// with Finder's choices, Merge for folders, Skip, and a side-by-side
+/// comparison of the two items.
+enum ConflictDialog {
+    static func present(source: URL, existing: URL, operation: FileOperation,
+                        completion: @escaping (ConflictResolution, Bool) -> Void) {
+        let verb: String
+        switch operation.kind {
+        case .move: verb = "moving"
+        case .duplicate: verb = "duplicating"
+        default: verb = "copying"
+        }
+        let incoming = ConflictItemInfo(url: source)
+        let current = ConflictItemInfo(url: existing)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = incoming.icon
+        alert.messageText = "An item named “\(source.lastPathComponent)” already exists in this location."
+        alert.informativeText = "Do you want to replace it with the one you’re \(verb)? The replaced item goes to the Trash."
+        var choices: [ConflictResolution] = [.keepBoth, .replace]
+        alert.addButton(withTitle: "Keep Both")
+        alert.addButton(withTitle: "Replace")
+        if incoming.isDirectory && current.isDirectory {
+            alert.addButton(withTitle: "Merge")
+            choices.append(.merge)
+        }
+        alert.addButton(withTitle: "Skip")
+        choices.append(.skip)
+        let stop = alert.addButton(withTitle: "Stop")
+        stop.keyEquivalent = "\u{1b}"
+        choices.append(.stop)
+        if operation.sources.count > 1 {
+            alert.showsSuppressionButton = true
+            alert.suppressionButton?.title = "Apply to All"
+        }
+        alert.accessoryView = comparison(existing: current, incoming: incoming)
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let resolution = index >= 0 && index < choices.count ? choices[index] : .stop
+            let all = alert.suppressionButton?.state == .on
+            completion(resolution, resolution == .stop ? false : all)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow, window.attachedSheet == nil, !(window is NSPanel) {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
+    }
+
+    /// Existing and new item side by side: modification date and size, with
+    /// the newer and the larger one marked.
+    private static func comparison(existing: ConflictItemInfo, incoming: ConflictItemInfo) -> NSView {
+        func label(_ text: String, size: CGFloat = 11, weight: NSFont.Weight = .regular,
+                   color: NSColor = .labelColor) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.font = .systemFont(ofSize: size, weight: weight)
+            field.textColor = color
+            field.lineBreakMode = .byTruncatingTail
+            return field
+        }
+        func column(_ title: String, _ info: ConflictItemInfo, _ other: ConflictItemInfo) -> NSStackView {
+            let newer = (info.modified ?? .distantPast) > (other.modified ?? .distantPast)
+            let larger = (info.size ?? 0) > (other.size ?? 0)
+            var views: [NSView] = [label(title, weight: .semibold, color: .secondaryLabelColor)]
+            views.append(label(info.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .short) } ?? "--"))
+            views.append(label(info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--")))
+            var marks: [String] = []
+            if newer { marks.append("Newer") }
+            if larger { marks.append("Larger") }
+            views.append(label(marks.isEmpty ? " " : marks.joined(separator: " · "), size: 10, weight: .semibold,
+                               color: .controlAccentColor))
+            let stack = NSStackView(views: views)
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 2
+            return stack
+        }
+        let row = NSStackView(views: [column("Existing", existing, incoming), column("New", incoming, existing)])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.distribution = .fillEqually
+        row.spacing = 12
+        row.frame = NSRect(x: 0, y: 0, width: 230, height: 64)
+        return row
+    }
+}
 
 struct ConflictItemInfo {
     let url: URL
@@ -307,105 +613,5 @@ struct ConflictItemInfo {
         modified = values?.contentModificationDate
         size = values?.totalFileSize.map { Int64($0) }
         isDirectory = values?.isDirectory ?? false
-    }
-}
-
-struct ConflictView: View {
-    let incoming: ConflictItemInfo
-    let existing: ConflictItemInfo
-    let verb: String
-    let onChoice: (ConflictResolution, Bool) -> Void
-    @State private var applyToAll = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
-                Image(nsImage: incoming.icon).resizable().frame(width: 52, height: 52)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("An item named “\(incoming.url.lastPathComponent)” already exists in this location.")
-                        .font(.system(size: 13, weight: .semibold))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Do you want to replace it with the one you’re \(verb)? The replaced item goes to the Trash, so you can get it back.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            HStack(spacing: 12) {
-                card(title: "Existing", info: existing, other: incoming)
-                Image(systemName: "arrow.left").foregroundStyle(.tertiary)
-                card(title: "New", info: incoming, other: existing)
-            }
-            Toggle("Apply to all", isOn: $applyToAll)
-                .toggleStyle(.checkbox)
-            HStack {
-                Button("Stop") { onChoice(.stop, false) }
-                    .keyboardShortcut(.cancelAction)
-                Button("Skip") { onChoice(.skip, applyToAll) }
-                Spacer()
-                if incoming.isDirectory && existing.isDirectory {
-                    Button("Merge") { onChoice(.merge, applyToAll) }
-                }
-                Button("Replace") { onChoice(.replace, applyToAll) }
-                Button("Keep Both") { onChoice(.keepBoth, applyToAll) }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 500)
-    }
-
-    private func card(title: String, info: ConflictItemInfo, other: ConflictItemInfo) -> some View {
-        let newer = (info.modified ?? .distantPast) > (other.modified ?? .distantPast)
-        let larger = (info.size ?? 0) > (other.size ?? 0)
-        return VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                Text(info.modified.map { Formatters.longDate($0) } ?? "--").font(.system(size: 11))
-                if newer { Text("Newer").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.accentColor) }
-            }
-            HStack(spacing: 4) {
-                Text(info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--")).font(.system(size: 11))
-                if larger { Text("Larger").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.accentColor) }
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.05)))
-    }
-}
-
-enum ConflictDialog {
-    /// Presents the conflict sheet on the key window (or as a panel) and calls back on the main thread.
-    static func present(source: URL, existing: URL, operation: FileOperation,
-                        completion: @escaping (ConflictResolution, Bool) -> Void) {
-        let verb: String
-        switch operation.kind {
-        case .move: verb = "moving"
-        case .duplicate: verb = "duplicating"
-        default: verb = "copying"
-        }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 500, height: 260),
-                            styleMask: [.titled, .docModalWindow], backing: .buffered, defer: true)
-        var finished = false
-        let view = ConflictView(incoming: ConflictItemInfo(url: source), existing: ConflictItemInfo(url: existing),
-                                verb: verb) { resolution, all in
-            guard !finished else { return }
-            finished = true
-            if let parent = panel.sheetParent {
-                parent.endSheet(panel)
-            } else {
-                panel.orderOut(nil)
-                NSApp.stopModal()
-            }
-            completion(resolution, all)
-        }
-        panel.contentViewController = NSHostingController(rootView: view)
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow, window.attachedSheet == nil {
-            window.beginSheet(panel)
-        } else {
-            panel.center()
-            NSApp.runModal(for: panel)
-        }
     }
 }

@@ -54,17 +54,19 @@ final class ColumnCellView: NSTableCellView {
         chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
         chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         chevron.contentTintColor = .tertiaryLabelColor
+        // Finder's metrics: 16 pt icon 6 pt into the highlight, the name 5 pt
+        // after it, the chevron 8 pt before the highlight's end.
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 17),
-            icon.heightAnchor.constraint(equalToConstant: 17),
-            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 3),
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
             tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 4),
             tags.centerYAnchor.constraint(equalTo: centerYAnchor),
             chevron.leadingAnchor.constraint(greaterThanOrEqualTo: tags.trailingAnchor, constant: 4),
-            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: 8),
         ])
@@ -77,7 +79,7 @@ final class ColumnCellView: NSTableCellView {
         name.stringValue = item.name
         name.isEditable = false
         chevron.isHidden = !item.isNavigable
-        loader.load(item, into: icon, points: 17, thumbnails: false)
+        loader.load(item, into: icon, points: 16, thumbnails: false)
         icon.alphaValue = (dimmed || item.isHidden) ? 0.5 : 1
         let label = item.labelIndex
         tags.colors = label > 0 ? [TagColors.color(forLabel: label)] : []
@@ -159,6 +161,12 @@ final class ColumnsDocumentView: NSView {
         needsLayout = true
     }
 
+    func setWidth(_ width: CGFloat, for view: NSView) {
+        guard let index = entries.firstIndex(where: { $0.view === view }), entries[index].width != width else { return }
+        entries[index].width = width
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
         var x: CGFloat = 0
@@ -196,7 +204,27 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     private let contextMenu = NSMenu()
     private var draggedItems: [FileItem] = []
     private static let cellID = NSUserInterfaceItemIdentifier("ColumnCell")
-    private let columnWidth: CGFloat = 236
+
+    /// Like Finder, each column is as wide as its longest name needs, within limits.
+    private static func fittedWidth(for items: [FileItem]) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+        // Only the longest names can be the widest: measure at most 96 of them.
+        var candidates = items
+        if items.count > 96 {
+            let lengths = items.map { $0.name.utf16.count }.sorted(by: >)
+            let threshold = lengths[95]
+            candidates = Array(items.lazy.filter { $0.name.utf16.count >= threshold }.prefix(128))
+        }
+        var widest: CGFloat = 0
+        var tagged = false
+        for item in candidates {
+            widest = max(widest, (item.name as NSString).size(withAttributes: attributes).width)
+            if item.labelIndex > 0 { tagged = true }
+        }
+        // Insets (10 + 10), icon (6 + 16 + 5), chevron (8 + 6 + 8), tag dot.
+        let chrome: CGFloat = 69 + (tagged ? 14 : 0)
+        return min(420, max(152, (widest + chrome).rounded(.up)))
+    }
 
     override func loadView() {
         document.autoresizingMask = []
@@ -310,7 +338,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         table.headerView = nil
         table.style = .inset
         table.rowSizeStyle = .custom
-        table.rowHeight = 22
+        table.rowHeight = 20.5
         table.intercellSpacing = NSSize(width: 0, height: 2)
         table.allowsMultipleSelection = true
         table.allowsEmptySelection = true
@@ -345,7 +373,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         column.scroll.borderType = .noBorder
         column.separator.boxType = .separator
 
-        document.append(column.scroll, width: columnWidth)
+        document.append(column.scroll, width: Self.fittedWidth(for: items))
         document.append(column.separator, width: 1)
         resizeDocument()
         columns.append(column)
@@ -400,6 +428,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     private func replaceItems(of column: Column, with newItems: [FileItem]) {
         let selected = column.table.selectedRowIndexes.compactMap { $0 < column.items.count ? column.items[$0] : nil }
         column.items = newItems
+        document.setWidth(Self.fittedWidth(for: newItems), for: column.scroll)
+        resizeDocument()
         isSyncing = true
         column.table.reloadData()
         var rows = IndexSet()

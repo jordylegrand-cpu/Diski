@@ -56,19 +56,21 @@ enum RowDensity: Int, CaseIterable {
         }
     }
 
+    /// Finder's list rows: 22.5 pt with small icons, 33.5 pt with large ones
+    /// (row height plus 2 pt between rows).
     var rowHeight: CGFloat {
         switch self {
-        case .compact: return 22
+        case .compact: return 20.5
         case .regular: return 26
-        case .comfortable: return 30
+        case .comfortable: return 31.5
         }
     }
 
     var iconSize: CGFloat {
         switch self {
         case .compact: return 16
-        case .regular: return 20
-        case .comfortable: return 26
+        case .regular: return 24
+        case .comfortable: return 32
         }
     }
 }

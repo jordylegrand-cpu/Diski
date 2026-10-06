@@ -115,7 +115,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private weak var searchItem: NSSearchToolbarItem?
     private weak var operationsItem: NSToolbarItem?
     private let operationsView = OperationsToolbarView()
-    private let toast = ToastView()
     private var previewItems: [URL] = []
 
     var panes: [PaneViewController] { paneContainer.panes }
@@ -141,7 +140,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let contentItem = NSSplitViewItem(viewController: paneContainer)
         contentItem.minimumThickness = 360
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
-        inspectorItem.minimumThickness = 230
+        inspectorItem.minimumThickness = 200
         inspectorItem.maximumThickness = 380
         inspectorItem.canCollapse = true
         inspectorItem.isCollapsed = !Prefs.showInspector
@@ -168,7 +167,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         window.setFrameAutosaveName("DiskiBrowserWindow")
         if window.frame.origin == .zero { window.center() }
 
-        installToast()
         firstResponderObservation = window.observe(\.firstResponder, options: [.new]) { [weak self] _, _ in
             self?.firstResponderChanged()
         }
@@ -188,23 +186,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         NotificationCenter.default.removeObserver(self)
     }
 
-    private func installToast() {
-        let container = paneContainer.view
-        toast.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(toast, positioned: .above, relativeTo: nil)
-        NSLayoutConstraint.activate([
-            toast.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -40),
-        ])
-    }
-
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         activePane.content.focus()
-    }
-
-    func showToast(_ text: String, symbol: String = "bolt.fill") {
-        toast.show(text, symbol: symbol)
     }
 
     // MARK: - Panes
@@ -226,6 +210,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateInspector()
         sidebar.highlight(path: pane.displayedPath)
         searchItem?.searchField.stringValue = pane.searchText
+        ViewOptionsPanel.shared.paneDidChange(pane)
     }
 
     var isDualPane: Bool { panes.count > 1 }
@@ -270,6 +255,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateToolbarState()
         updateInspector()
         sidebar.highlight(path: pane.isSearchResults ? nil : pane.displayedPath)
+        ViewOptionsPanel.shared.paneDidChange(pane)
     }
 
     func paneDidChangeSelection(_ pane: PaneViewController) {
@@ -284,7 +270,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func paneDidChangeViewMode(_ pane: PaneViewController) {
-        if pane === activePane { updateToolbarState(); updateInspector() }
+        guard pane === activePane else { return }
+        updateToolbarState()
+        updateInspector()
+        ViewOptionsPanel.shared.paneDidChange(pane)
     }
 
     func paneRequestsFocusSwitch(_ pane: PaneViewController) -> Bool {
@@ -415,13 +404,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     @objc func showViewOptions(_ sender: Any?) {
-        guard let window else { return }
-        ViewOptionsPopover.toggle(for: activePane, in: window)
+        ViewOptionsPanel.shared.toggle(for: activePane)
     }
 
     @objc func showOperations(_ sender: Any?) {
-        guard let view = operationsItem?.view ?? window?.contentView else { return }
-        OperationsPopover.show(relativeTo: view)
+        ProgressWindowController.shared.present()
     }
 
     // MARK: - Search field
@@ -462,39 +449,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: - Operations feedback
 
     @objc private func operationsChanged() {
-        let active = FileOperationManager.shared.activeOperations
         operationsView.update(with: FileOperationManager.shared.operations)
         if let item = operationsItem {
             let shouldHide = FileOperationManager.shared.operations.isEmpty
             if item.isHidden != shouldHide { item.isHidden = shouldHide }
         }
-        _ = active
     }
 
+    /// Operations too quick for the progress window get a short native
+    /// confirmation under the toolbar's progress item instead.
     @objc private func operationFinished(_ notification: Notification) {
         guard window?.isKeyWindow == true || NSApp.keyWindow == nil,
               Prefs.showOperationToasts,
-              let operation = notification.object as? FileOperation, operation.state == .finished else { return }
-        let elapsed = (operation.finishedAt ?? Date()).timeIntervalSince(operation.startedAt)
-        let count = operation.sources.count
-        let what = count == 1 ? "“\(operation.sources[0].lastPathComponent)”" : "\(count) items"
-        let snapshot = operation.snapshot
-        switch operation.kind {
-        case .copy, .duplicate, .move:
-            var text = "\(operation.kind.pastTense) \(what) in \(Formatters.duration(elapsed))"
-            if snapshot.instant && operation.kind != .move { text += " · instant APFS clone" }
-            else if snapshot.totalBytes > 0 && elapsed > 0.05 {
-                text += " · \(Formatters.rate(Double(snapshot.totalBytes) / elapsed))"
-            }
-            showToast(text, symbol: "bolt.fill")
-        case .trash:
-            showToast("Moved \(what) to the Trash · ⌘Z to undo", symbol: "trash")
-        case .compress:
-            showToast("Compressed \(what)", symbol: "archivebox")
-        case .emptyTrash:
-            showToast("Trash emptied", symbol: "trash.slash")
-        case .delete:
-            showToast("Deleted \(what)", symbol: "trash.slash")
+              let operation = notification.object as? FileOperation, operation.state == .finished,
+              !ProgressWindowController.shared.didShow(operation) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window, window.isVisible,
+                  self.operationsView.window === window, self.operationsItem?.isHidden == false else { return }
+            OperationFinishedPopover.show(operation, relativeTo: self.operationsView)
         }
     }
 

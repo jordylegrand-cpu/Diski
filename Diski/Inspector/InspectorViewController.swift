@@ -1,57 +1,215 @@
 import AppKit
-import CoreServices
-import SwiftUI
 
-struct InfoRow: Identifiable, Equatable {
-    var id: String { label }
+struct InfoRow: Equatable {
     let label: String
     let value: String
 }
 
-final class InspectorModel: ObservableObject {
-    @Published var title = ""
-    @Published var subtitle = ""
-    @Published var image: NSImage?
-    @Published var rows: [InfoRow] = []
-    @Published var moreRows: [InfoRow] = []
-    @Published var tags: [String] = []
-    @Published var urls: [URL] = []
-    @Published var compact = false
-    @Published var hasContent = false
-    @Published var showMore = false
-    var onAddTag: ((String) -> Void)?
-    var onRemoveTag: ((String) -> Void)?
+/// One "label … value" line of the preview pane's Information section, with
+/// a hairline above it like Finder's.
+final class InspectorRowView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private let value = NSTextField(labelWithString: "")
+    private let line = HairlineView()
+
+    init(_ row: InfoRow, separator: Bool) {
+        super.init(frame: .zero)
+        for field in [label, value] {
+            field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            field.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(field)
+        }
+        label.stringValue = row.label
+        label.textColor = .secondaryLabelColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        value.stringValue = row.value
+        value.alignment = .right
+        value.isSelectable = true
+        let multiline = row.label == "Where" || row.label == "Where from"
+        value.maximumNumberOfLines = multiline ? 3 : 1
+        value.lineBreakMode = multiline ? .byCharWrapping : .byTruncatingMiddle
+        value.cell?.truncatesLastVisibleLine = true
+        value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.isHidden = !separator
+        addSubview(line)
+        NSLayoutConstraint.activate([
+            line.leadingAnchor.constraint(equalTo: leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor),
+            line.topAnchor.constraint(equalTo: topAnchor),
+            line.heightAnchor.constraint(equalToConstant: 1),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor),
+            label.firstBaselineAnchor.constraint(equalTo: value.firstBaselineAnchor),
+            value.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 10),
+            value.trailingAnchor.constraint(equalTo: trailingAnchor),
+            value.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            value.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3.5),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 21.5),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 }
 
-/// The preview pane (Finder's "Show Preview"): big preview, name, facts, tags.
-final class InspectorViewController: NSViewController {
-    let model = InspectorModel()
+/// The preview pane (Finder's "Show Preview"): big preview, name, kind and
+/// size, the Information section, tags and More…. Plain AppKit on the
+/// split view's native inspector pane.
+final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     private var token = 0
     private var currentKey = ""
     /// The folder whose size is shown; recalculated when its contents change.
     private var sizedFolder: (item: FileItem, kind: String)?
     private var sizeRefreshScheduled = false
+    private var urls: [URL] = []
+    private var shownTags: [String] = []
+    private var rows: [InfoRow] = []
+    private var moreRows: [InfoRow] = []
+    private var showsMore = false
 
-    var compact: Bool {
-        get { model.compact }
-        set { if model.compact != newValue { model.compact = newValue } }
+    private let scrollView = NSScrollView()
+    private let stack = NSStackView()
+    private let previewBox = NSView()
+    private let preview = NSImageView()
+    private let compactPreview = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let compactHeader = NSStackView()
+    private let infoHeader = InspectorViewController.sectionTitle("Information")
+    private let rowsStack = NSStackView()
+    private let tagsHeader = InspectorViewController.sectionTitle("Tags")
+    private let tagField = NSTokenField()
+    private let moreButton = NSButton()
+    private let emptyLabel = NSTextField(labelWithString: "No Selection")
+    private let imageLoader = ItemImageLoader()
+    private let compactLoader = ItemImageLoader()
+    private var previewHeight: NSLayoutConstraint!
+
+    var compact = false {
+        didSet {
+            guard compact != oldValue else { return }
+            currentKey = ""
+            if isViewLoaded { applyCompactLayout() }
+        }
+    }
+
+    private static func sectionTitle(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        return field
     }
 
     override func loadView() {
-        model.onAddTag = { [weak self] tag in self?.addTag(tag) }
-        model.onRemoveTag = { [weak self] tag in self?.removeTag(tag) }
-        let hosting = NSHostingView(rootView: InspectorView(model: model))
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        let container = NSView()
-        container.addSubview(hosting)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 224, height: 600))
+
+        preview.imageScaling = .scaleProportionallyUpOrDown
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        previewBox.translatesAutoresizingMaskIntoConstraints = false
+        previewBox.addSubview(preview)
+        previewHeight = previewBox.heightAnchor.constraint(equalToConstant: 260)
+
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        compactPreview.imageScaling = .scaleProportionallyUpOrDown
+        compactPreview.translatesAutoresizingMaskIntoConstraints = false
+        compactPreview.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        compactPreview.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        compactHeader.orientation = .horizontal
+        compactHeader.spacing = 10
+        compactHeader.alignment = .centerY
+
+        rowsStack.orientation = .vertical
+        rowsStack.alignment = .leading
+        rowsStack.spacing = 0
+
+        tagField.placeholderString = "Add Tags…"
+        tagField.font = .systemFont(ofSize: 12)
+        tagField.isBordered = false
+        tagField.drawsBackground = false
+        tagField.focusRingType = .none
+        tagField.tokenStyle = .rounded
+        tagField.delegate = self
+        (tagField.cell as? NSTokenFieldCell)?.placeholderAttributedString = NSAttributedString(
+            string: "Add Tags…", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.tertiaryLabelColor])
+
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 11, bottom: 16, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for view in [previewBox, compactHeader, titleLabel, subtitleLabel, infoHeader, rowsStack, tagsHeader, tagField] as [NSView] {
+            stack.addArrangedSubview(view)
+        }
+        for view in [previewBox, rowsStack, tagField, titleLabel, subtitleLabel] as [NSView] {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
+        }
+        stack.setCustomSpacing(2, after: titleLabel)
+        stack.setCustomSpacing(8, after: subtitleLabel)
+        stack.setCustomSpacing(3, after: infoHeader)
+        stack.setCustomSpacing(12, after: rowsStack)
+        stack.setCustomSpacing(2, after: tagsHeader)
+
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+        scrollView.documentView = document
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        moreButton.isBordered = false
+        moreButton.imagePosition = .imageAbove
+        moreButton.imageHugsTitle = true
+        moreButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        moreButton.contentTintColor = .secondaryLabelColor
+        moreButton.target = self
+        moreButton.action = #selector(toggleMore)
+        moreButton.translatesAutoresizingMaskIntoConstraints = false
+        updateMoreButton()
+
+        emptyLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
+        emptyLabel.textColor = .tertiaryLabelColor
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(scrollView)
+        root.addSubview(moreButton)
+        root.addSubview(emptyLabel)
         NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            preview.centerXAnchor.constraint(equalTo: previewBox.centerXAnchor),
+            preview.centerYAnchor.constraint(equalTo: previewBox.centerYAnchor),
+            {
+                let fill = preview.widthAnchor.constraint(equalTo: previewBox.widthAnchor, constant: -14)
+                fill.priority = .defaultHigh
+                return fill
+            }(),
+            preview.widthAnchor.constraint(lessThanOrEqualToConstant: 256),
+            preview.heightAnchor.constraint(equalTo: preview.widthAnchor),
+            previewHeight,
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+            document.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: moreButton.topAnchor, constant: -6),
+            moreButton.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            moreButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            emptyLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),
         ])
-        container.frame = NSRect(x: 0, y: 0, width: 260, height: 600)
-        view = container
+        view = root
+        applyCompactLayout()
+        setHasContent(false)
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(folderContentsDidChange(_:)),
@@ -64,76 +222,150 @@ final class InspectorViewController: NSViewController {
         NotificationCenter.default.removeObserver(self)
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // The preview area is a bit taller than wide, like Finder's.
+        let height = compact ? 0 : min(320, max(160, (view.bounds.width * 1.27).rounded()))
+        if previewHeight.constant != height { previewHeight.constant = height }
+    }
+
+    private func applyCompactLayout() {
+        previewBox.isHidden = compact
+        compactHeader.isHidden = !compact
+        if compact {
+            compactHeader.setViews([compactPreview, verticalTitles()], in: .leading)
+            stack.edgeInsets.top = 16
+        } else {
+            for view in compactHeader.views { compactHeader.removeView(view) }
+            if titleLabel.superview !== stack {
+                stack.insertArrangedSubview(titleLabel, at: 2)
+                stack.insertArrangedSubview(subtitleLabel, at: 3)
+                titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
+                subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -21).isActive = true
+                stack.setCustomSpacing(2, after: titleLabel)
+                stack.setCustomSpacing(8, after: subtitleLabel)
+            }
+            stack.edgeInsets.top = 0
+        }
+        stack.setCustomSpacing(16, after: compactHeader)
+        view.needsLayout = true
+    }
+
+    private func verticalTitles() -> NSStackView {
+        titleLabel.removeFromSuperview()
+        subtitleLabel.removeFromSuperview()
+        let titles = NSStackView(views: [titleLabel, subtitleLabel])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 2
+        return titles
+    }
+
+    private func setHasContent(_ hasContent: Bool) {
+        scrollView.isHidden = !hasContent
+        moreButton.isHidden = !hasContent
+        emptyLabel.isHidden = hasContent
+    }
+
+    private func updateMoreButton() {
+        moreButton.title = showsMore ? "Less" : "More…"
+        moreButton.image = NSImage(systemSymbolName: showsMore ? "chevron.up.circle" : "ellipsis.circle",
+                                   accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+    }
+
+    @objc private func toggleMore() {
+        showsMore.toggle()
+        updateMoreButton()
+        rebuildRows()
+    }
+
+    private func setImage(_ image: NSImage?) {
+        preview.image = image
+        compactPreview.image = image
+    }
+
+    private func rebuildRows() {
+        for view in rowsStack.arrangedSubviews { rowsStack.removeArrangedSubview(view); view.removeFromSuperview() }
+        let all = showsMore ? rows + moreRows : rows
+        for (index, row) in all.enumerated() {
+            let view = InspectorRowView(row, separator: index > 0)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            rowsStack.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
+        }
+        infoHeader.isHidden = all.isEmpty
+    }
+
+    private func setRows(_ newRows: [InfoRow]? = nil, more newMore: [InfoRow]? = nil) {
+        if let newRows { rows = newRows }
+        if let newMore { moreRows = newMore }
+        rebuildRows()
+    }
+
+    // MARK: Showing items
+
     /// Shows `items`, or the folder at `folderPath` when nothing is selected.
     func show(items: [FileItem], folderPath: String?) {
+        _ = view
         let key = items.map { "\($0.path)|\($0.modified)|\($0.labelIndex)" }.joined(separator: "\n") + "|" + (folderPath ?? "")
         guard key != currentKey else { return }
         currentKey = key
         token += 1
         let token = self.token
         sizedFolder = nil
+        imageLoader.cancel()
+        compactLoader.cancel()
 
         var subjects = items
         if subjects.isEmpty, let folderPath, let folder = FileItem.make(path: folderPath) {
             subjects = [folder]
         }
         guard !subjects.isEmpty else {
-            model.hasContent = false
-            model.urls = []
+            urls = []
+            setHasContent(false)
             return
         }
-        model.hasContent = true
-        model.urls = subjects.map { $0.url }
-        model.showMore = false
-
+        setHasContent(true)
+        urls = subjects.map { $0.url }
         if subjects.count > 1 {
-            describeMultiple(subjects, token: token)
+            describeMultiple(subjects)
         } else {
             describe(subjects[0], token: token)
         }
     }
 
-    private func describeMultiple(_ items: [FileItem], token: Int) {
-        model.title = "\(items.count) items"
+    private func describeMultiple(_ items: [FileItem]) {
+        titleLabel.stringValue = "\(items.count) items"
         let total = items.reduce(Int64(0)) { $0 + max(0, $1.displaySize) }
         let folders = items.filter { $0.isDirectoryOnDisk }.count
         var parts: [String] = []
         if folders > 0 { parts.append(Formatters.count(folders, "folder")) }
         if items.count - folders > 0 { parts.append(Formatters.count(items.count - folders, "file")) }
-        model.subtitle = parts.joined(separator: ", ") + (total > 0 ? " – " + Formatters.size(total) : "")
-        model.image = IconCache.shared.immediateIcon(for: items[0])
+        subtitleLabel.stringValue = parts.joined(separator: ", ") + (total > 0 ? " – " + Formatters.size(total) : "")
+        setImage(NSWorkspace.shared.icon(forFiles: items.prefix(32).map { $0.path }) ?? IconCache.shared.immediateIcon(for: items[0]))
         let modified = items.map { $0.modified }.max() ?? 0
-        model.rows = [InfoRow(label: "Latest change", value: Formatters.longDate(Date(timeIntervalSince1970: modified)))]
-        model.moreRows = []
-        model.tags = []
+        setRows([InfoRow(label: "Latest change", value: Formatters.longDate(Date(timeIntervalSince1970: modified)))], more: [])
+        setTags([])
     }
 
     private func describe(_ item: FileItem, token: Int) {
-        model.title = item.name
+        titleLabel.stringValue = item.name
         let kind = FileKinds.kind(for: item)
         let size = item.displaySize
-        model.subtitle = size >= 0 ? "\(kind) – \(Formatters.size(size))" : kind
-        model.image = IconCache.shared.cachedItemIcon(path: item.path) ?? IconCache.shared.immediateIcon(for: item)
-        model.rows = [
+        subtitleLabel.stringValue = size >= 0 ? "\(kind) – \(Formatters.size(size))" : kind
+        setImage(IconCache.shared.cachedItemIcon(path: item.path) ?? IconCache.shared.immediateIcon(for: item))
+        setRows([
             InfoRow(label: "Created", value: Formatters.longDate(item.createdDate)),
             InfoRow(label: "Modified", value: Formatters.longDate(item.modifiedDate)),
-        ]
-        model.moreRows = baseMoreRows(for: item, kind: kind)
-        model.tags = []
+        ], more: baseMoreRows(for: item, kind: kind))
+        setTags([])
 
-        // Item artwork / thumbnail.
-        if IconCache.shared.needsItemIcon(item) {
-            IconCache.shared.loadItemIcon(for: item) { [weak self] icon in
-                guard let self, token == self.token, !FileKinds.wantsThumbnail(item) else { return }
-                self.model.image = icon
-            }
-        }
-        if FileKinds.wantsThumbnail(item) {
-            let scale = view.window?.backingScaleFactor ?? 2
-            ThumbnailCache.shared.request(for: item, points: 256, scale: scale) { [weak self] image in
-                guard let self, token == self.token, let image else { return }
-                self.model.image = image
-            }
+        // Artwork: the item's own icon, then a thumbnail for images, movies and documents.
+        if compact {
+            compactLoader.load(item, into: compactPreview, points: 40, thumbnails: true)
+        } else {
+            imageLoader.load(item, into: preview, points: min(256, max(64, preview.bounds.width)), thumbnails: true)
         }
 
         // Folder size, computed in the background.
@@ -142,10 +374,10 @@ final class InspectorViewController: NSViewController {
             if let cached = FolderSizer.shared.cached(item.path) {
                 applyFolderSize(cached, to: item, kind: kind)
             } else {
-                model.subtitle = "\(kind) – Calculating…"
+                subtitleLabel.stringValue = "\(kind) – Calculating…"
                 FolderSizer.shared.size(of: item.path, progress: { [weak self] bytes in
                     guard let self, token == self.token else { return }
-                    self.model.subtitle = "\(kind) – \(Formatters.size(bytes))…"
+                    self.subtitleLabel.stringValue = "\(kind) – \(Formatters.size(bytes))…"
                 }, completion: { [weak self] result in
                     guard let self, token == self.token else { return }
                     item.computedFolderSize = result.bytes
@@ -157,26 +389,27 @@ final class InspectorViewController: NSViewController {
         // Spotlight metadata and tags (cheap, but off the main thread).
         let url = item.url
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let metadata = Self.metadata(for: url)
-            let tags = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
+            let metadata = ItemMetadata.load(url)
             DispatchQueue.main.async {
                 guard let self, token == self.token else { return }
-                var rows = self.model.rows
+                var rows = self.rows
                 if let lastOpened = metadata.lastOpened {
                     rows.append(InfoRow(label: "Last opened", value: Formatters.longDate(lastOpened)))
                 }
                 if let dimensions = metadata.dimensions { rows.append(InfoRow(label: "Dimensions", value: dimensions)) }
                 if let duration = metadata.duration { rows.append(InfoRow(label: "Duration", value: duration)) }
-                self.model.rows = rows
-                if let version = metadata.version {
-                    self.model.moreRows.append(InfoRow(label: "Version", value: version))
-                }
-                if let whereFrom = metadata.whereFrom {
-                    self.model.moreRows.append(InfoRow(label: "Where from", value: whereFrom))
-                }
-                self.model.tags = tags
+                var more = self.moreRows
+                if let version = metadata.version { more.append(InfoRow(label: "Version", value: version)) }
+                if let whereFrom = metadata.whereFrom { more.append(InfoRow(label: "Where from", value: whereFrom)) }
+                self.setRows(rows, more: more)
+                self.setTags(metadata.tags)
             }
         }
+    }
+
+    private func setTags(_ tags: [String]) {
+        shownTags = tags
+        tagField.objectValue = tags
     }
 
     // MARK: Live folder size
@@ -214,10 +447,11 @@ final class InspectorViewController: NSViewController {
     }
 
     private func applyFolderSize(_ result: FolderSizer.Result, to item: FileItem, kind: String) {
-        model.subtitle = "\(kind) – \(Formatters.size(result.bytes))"
-        model.moreRows.removeAll { $0.label == "Size" || $0.label == "Contains" }
-        model.moreRows.insert(InfoRow(label: "Size", value: Formatters.preciseSize(result.bytes)), at: 0)
-        model.moreRows.insert(InfoRow(label: "Contains", value: Formatters.count(result.items, "item")), at: 1)
+        subtitleLabel.stringValue = "\(kind) – \(Formatters.size(result.bytes))"
+        var more = moreRows.filter { $0.label != "Size" && $0.label != "Contains" }
+        more.insert(InfoRow(label: "Size", value: Formatters.preciseSize(result.bytes)), at: 0)
+        more.insert(InfoRow(label: "Contains", value: Formatters.count(result.items, "item")), at: 1)
+        setRows(more: more)
     }
 
     private func baseMoreRows(for item: FileItem, kind: String) -> [InfoRow] {
@@ -231,259 +465,30 @@ final class InspectorViewController: NSViewController {
         }
         rows.append(InfoRow(label: "Where", value: item.parentPath))
         if let added = item.addedDate { rows.append(InfoRow(label: "Added", value: Formatters.longDate(added))) }
-        rows.append(InfoRow(label: "Permissions", value: Self.permissions(item.mode)))
+        rows.append(InfoRow(label: "Permissions", value: ItemMetadata.permissions(item.mode)))
         if item.isLocked { rows.append(InfoRow(label: "Locked", value: "Yes")) }
         if item.isHidden { rows.append(InfoRow(label: "Hidden", value: "Yes")) }
         return rows
     }
 
-    private static func permissions(_ mode: UInt32) -> String {
-        let chars = ["r", "w", "x"]
-        var result = ""
-        for shift in stride(from: 6, through: 0, by: -3) {
-            for (bit, char) in chars.enumerated() {
-                result += (mode >> UInt32(shift)) & (4 >> UInt32(bit)) != 0 ? char : "-"
-            }
-        }
-        return result
-    }
-
-    struct Metadata {
-        var lastOpened: Date?
-        var dimensions: String?
-        var duration: String?
-        var version: String?
-        var whereFrom: String?
-    }
-
-    private static func metadata(for url: URL) -> Metadata {
-        var result = Metadata()
-        guard let item = MDItemCreateWithURL(kCFAllocatorDefault, url as CFURL) else { return result }
-        result.lastOpened = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
-        if let width = MDItemCopyAttribute(item, kMDItemPixelWidth) as? Int,
-           let height = MDItemCopyAttribute(item, kMDItemPixelHeight) as? Int {
-            result.dimensions = "\(width) × \(height)"
-        }
-        if let seconds = MDItemCopyAttribute(item, kMDItemDurationSeconds) as? Double, seconds > 0 {
-            let total = Int(seconds.rounded())
-            result.duration = total >= 3600
-                ? String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
-                : String(format: "%d:%02d", total / 60, total % 60)
-        }
-        result.version = MDItemCopyAttribute(item, kMDItemVersion) as? String
-        if let origins = MDItemCopyAttribute(item, kMDItemWhereFroms) as? [String], let first = origins.first {
-            result.whereFrom = first
-        }
-        return result
-    }
-
     // MARK: Tag editing
 
-    func addTag(_ raw: String) {
-        let tag = raw.trimmingCharacters(in: .whitespaces)
-        guard !tag.isEmpty else { return }
-        for url in model.urls {
-            var tags = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
-            if !tags.contains(tag) {
-                tags.append(tag)
-                try? (url as NSURL).setResourceValue(tags, forKey: .tagNamesKey)
-            }
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard notification.object as? NSTokenField === tagField else { return }
+        let tags = (tagField.objectValue as? [Any] ?? []).compactMap { $0 as? String }
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard tags != shownTags, !urls.isEmpty else { return }
+        // Tags removed here are removed from every selected item; added ones are added to all.
+        let removed = Set(shownTags).subtracting(tags)
+        let added = tags.filter { !shownTags.contains($0) }
+        for url in urls {
+            var current = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
+            current.removeAll { removed.contains($0) }
+            for tag in added where !current.contains(tag) { current.append(tag) }
+            try? (url as NSURL).setResourceValue(current, forKey: .tagNamesKey)
         }
-        if !model.tags.contains(tag) { model.tags.append(tag) }
-        refreshListings()
-    }
-
-    func removeTag(_ tag: String) {
-        for url in model.urls {
-            var tags = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
-            tags.removeAll { $0 == tag }
-            try? (url as NSURL).setResourceValue(tags, forKey: .tagNamesKey)
-        }
-        model.tags.removeAll { $0 == tag }
-        refreshListings()
-    }
-
-    private func refreshListings() {
-        let parents = Set(model.urls.map { DirectoryReader.normalized($0.deletingLastPathComponent().path) })
-        DirectoryStore.shared.reload(paths: parents)
+        shownTags = tags
+        ItemAttributes.reloadParents(of: urls)
         currentKey = ""
-    }
-}
-
-// MARK: - SwiftUI
-
-struct InspectorView: View {
-    @ObservedObject var model: InspectorModel
-    @State private var newTag = ""
-
-    var body: some View {
-        Group {
-            if model.hasContent {
-                content
-            } else {
-                VStack {
-                    Spacer()
-                    Text("No Selection")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-
-    private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    section("Information")
-                    ForEach(model.rows) { row in rowView(row) }
-                    if model.showMore {
-                        ForEach(model.moreRows) { row in rowView(row) }
-                    }
-                    section("Tags")
-                    tagsView
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
-            }
-            moreButton
-        }
-    }
-
-    @ViewBuilder
-    private var header: some View {
-        if model.compact {
-            HStack(spacing: 10) {
-                artwork.frame(width: 40, height: 40)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(model.subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .padding(.top, 18)
-        } else {
-            artwork
-                .frame(maxWidth: .infinity)
-                .frame(height: 200)
-                .padding(.top, 26)
-                .padding(.bottom, 28)
-            Text(model.title)
-                .font(.system(size: 15, weight: .semibold))
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Text(model.subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-        }
-    }
-
-    @ViewBuilder
-    private var artwork: some View {
-        if let image = model.image {
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
-                .animation(.easeOut(duration: 0.15), value: model.title)
-        } else {
-            Color.clear
-        }
-    }
-
-    private func section(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 13, weight: .semibold))
-            .padding(.top, 18)
-            .padding(.bottom, 6)
-    }
-
-    private func rowView(_ row: InfoRow) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(row.label)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Text(row.value)
-                .multilineTextAlignment(.trailing)
-                .lineLimit(row.label == "Where" || row.label == "Where from" ? 3 : 1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-        }
-        .font(.system(size: 11))
-        .padding(.vertical, 3.5)
-    }
-
-    private var tagsView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !model.tags.isEmpty {
-                FlowTags(tags: model.tags) { tag in
-                    model.onRemoveTag?(tag)
-                }
-            }
-            TextField("Add Tags…", text: $newTag)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .onSubmit {
-                    model.onAddTag?(newTag)
-                    newTag = ""
-                }
-        }
-    }
-
-    private var moreButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) { model.showMore.toggle() }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: model.showMore ? "chevron.up.circle" : "ellipsis.circle")
-                    .font(.system(size: 15))
-                Text(model.showMore ? "Less" : "More…")
-                    .font(.system(size: 11))
-            }
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.vertical, 12)
-    }
-}
-
-/// Wrapping row of tag chips.
-struct FlowTags: View {
-    let tags: [String]
-    let onRemove: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(tags, id: \.self) { tag in
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color(nsColor: TagColors.color(forTagName: tag) ?? .tertiaryLabelColor))
-                        .frame(width: 9, height: 9)
-                    Text(tag).font(.system(size: 12))
-                    Button {
-                        onRemove(tag)
-                    } label: {
-                        Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.tertiary)
-                }
-            }
-        }
     }
 }

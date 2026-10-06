@@ -38,7 +38,13 @@ shoot() {
 }
 
 shoot list     -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "6aaad54bb2b1e1dde7d2ff9c_OLDERNEW" -DiskiCIExpand "Misc"
-shoot columns  -DiskiCIPath "$DEMO/Misc/p2qkn5l7k2bp0mc0" -DiskiCIViewMode 2
+shoot columns  -DiskiCIPath "$DEMO/Misc" -DiskiCIViewMode 2 -DiskiCISelect "p2qkn5l7k2bp0mc0"
+shoot viewoptions -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCIViewOptions YES
+shoot getinfo  -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "Hill and Houses, Cape Elizabeth, Maine – Edward Hopper – 1927.jpg" -DiskiCIGetInfo YES
+# The sidebar at each system sidebar size (System Settings › Appearance).
+for size in 1 2 3; do
+  shoot "sidebar-$size" -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -NSTableViewDefaultSizeMode $size
+done
 shoot gallery  -DiskiCIPath "$DEMO/Design" -DiskiCIViewMode 3
 shoot icons    -DiskiCIPath "$DEMO" -DiskiCIViewMode 0
 shoot dark     -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCIAppearance dark -DiskiCISelect "Design"
@@ -53,12 +59,20 @@ dd if=/dev/zero of="$DEMO/Big Media/Interview.mov" bs=1m count=600 2>/dev/null
 for i in $(seq 1 400); do printf 'frame %d\n' "$i" > "$DEMO/Big Media/frame-$i.txt"; done
 mkdir -p "$DEMO/Clones"
 SHOT_DELAY=3.4 shoot clone -DiskiCIPath "$DEMO/Clones" -DiskiCIViewMode 1 \
-  -DiskiCICopy "$DEMO/Big Media|$DEMO/Clones" -DiskiCIShowOperations YES
+  -DiskiCICopy "$DEMO/Big Media|$DEMO/Clones"
+# The same copy again: the native "already exists" alert.
+SHOT_DELAY=3.4 shoot conflict -DiskiCIPath "$DEMO/Clones" -DiskiCIViewMode 1 \
+  -DiskiCICopy "$DEMO/Big Media|$DEMO/Clones"
 
 DEV=$(hdiutil attach -nomount ram://6291456 2>/dev/null | awk '{print $1}')
 if [ -n "$DEV" ] && diskutil erasevolume APFS "Fast Drive" "$DEV" >/dev/null 2>&1; then
   # Late enough for the copy to finish on a slow runner (the result stays in
   # the operations popover for 6 s).
+  # Mid-copy: Finder's "Copy" progress window.
+  SHOT_DELAY=3 shoot progress -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
+    -DiskiCICopy "$DEMO/Big Media|/Volumes/Fast Drive"
+  rm -rf "/Volumes/Fast Drive/Big Media"
+  # Late enough for the copy to finish on a slow runner.
   SHOT_DELAY=9 shoot copy -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
     -DiskiCICopy "$DEMO/Big Media|/Volumes/Fast Drive" -DiskiCIShowOperations YES
   ls -la "/Volumes/Fast Drive" "/Volumes/Fast Drive/Big Media" 2>/dev/null | head -8

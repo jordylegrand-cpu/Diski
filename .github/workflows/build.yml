@@ -27,6 +27,7 @@ jobs:
           xcode-select -p
           system_profiler SPDisplaysDataType | grep -E "Resolution|Display Type|UI Looks" || true
           ls -d /Applications/Xcode* || true
+          defaults read -g NSTableViewDefaultSizeMode || echo "NSTableViewDefaultSizeMode not set"
 
       - name: Build (Release)
         run: |

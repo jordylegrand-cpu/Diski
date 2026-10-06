@@ -1,92 +1,281 @@
 import AppKit
-import SwiftUI
 
-/// View Options (⌘J): per-pane sorting plus the app-wide display settings.
-final class ViewOptionsModel: ObservableObject {
+/// View Options (⌘J): Finder's floating utility panel. It follows the active
+/// browser window and shows the options of its current view.
+final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
+    static let shared = ViewOptionsPanel()
+
     private weak var pane: PaneViewController?
-    @Published var sortKey: String { didSet { applySort() } }
-    @Published var ascending: Bool { didSet { applySort() } }
-    @Published var foldersOnTop = Prefs.foldersOnTop { didSet { Prefs.foldersOnTop = foldersOnTop } }
-    @Published var showHidden = Prefs.showHiddenFiles { didSet { Prefs.showHiddenFiles = showHidden } }
-    @Published var folderSizes = Prefs.calculateFolderSizes { didSet { Prefs.calculateFolderSizes = folderSizes } }
-    @Published var thumbnails = Prefs.showThumbnailsInList { didSet { Prefs.showThumbnailsInList = thumbnails } }
-    @Published var density = Prefs.rowDensity.rawValue { didSet { Prefs.rowDensity = RowDensity(rawValue: density) ?? .comfortable } }
-    @Published var iconSize = Double(Prefs.iconSize) { didSet { Prefs.iconSize = CGFloat(iconSize) } }
-    let viewMode: ViewMode
+    private let stack = NSStackView()
+    private var observers: [NSObjectProtocol] = []
 
-    init(pane: PaneViewController) {
-        self.pane = pane
-        sortKey = pane.arrangeOptions.sortKey.rawValue
-        ascending = pane.arrangeOptions.ascending
-        viewMode = pane.viewMode
+    private init() {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 270, height: 400),
+                            styleMask: [.titled, .closable, .utilityWindow],
+                            backing: .buffered, defer: true)
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = true
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isReleasedWhenClosed = false
+        super.init(window: panel)
+        panel.delegate = self
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 18, right: 18)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            content.widthAnchor.constraint(equalToConstant: 270),
+        ])
+        panel.contentView = content
+        panel.setFrameAutosaveName("DiskiViewOptions")
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main) { [weak self] note in
+            guard let self, self.window?.isVisible == true,
+                  let browser = (note.object as? NSWindow)?.windowController as? BrowserWindowController else { return }
+            self.attach(to: browser.activePane)
+        })
+        observers.append(center.addObserver(forName: Prefs.didChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.window?.isVisible == true, !self.isApplying else { return }
+            self.rebuild()
+        })
     }
 
-    private func applySort() {
-        guard let pane, let key = SortKey(rawValue: sortKey) else { return }
-        if key != pane.arrangeOptions.sortKey || ascending != pane.arrangeOptions.ascending {
-            pane.setSort(key, ascending: ascending)
-        }
-    }
-}
+    required init?(coder: NSCoder) { fatalError() }
 
-struct ViewOptionsView: View {
-    @ObservedObject var model: ViewOptionsModel
+    private var isApplying = false
 
-    var body: some View {
-        Form {
-            Section {
-                Picker("Sort by", selection: $model.sortKey) {
-                    ForEach(SortKey.allCases, id: \.rawValue) { key in Text(key.title).tag(key.rawValue) }
-                }
-                Picker("Order", selection: $model.ascending) {
-                    Text("Ascending").tag(true)
-                    Text("Descending").tag(false)
-                }
-                .pickerStyle(.segmented)
-                Toggle("Keep folders on top", isOn: $model.foldersOnTop)
-            }
-            Section {
-                Toggle("Show hidden files", isOn: $model.showHidden)
-                Toggle("Calculate folder sizes", isOn: $model.folderSizes)
-                Toggle("Show thumbnails in lists", isOn: $model.thumbnails)
-            }
-            Section {
-                if model.viewMode == .icons {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Icon size: \(Int(model.iconSize)) pt")
-                        Slider(value: $model.iconSize, in: 32...256)
-                    }
-                } else {
-                    Picker("Row size", selection: $model.density) {
-                        ForEach(RowDensity.allCases, id: \.rawValue) { density in Text(density.title).tag(density.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 340)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-@MainActor
-enum ViewOptionsPopover {
-    private static var popover: NSPopover?
-
-    static func toggle(for pane: PaneViewController, in window: NSWindow) {
-        if let popover, popover.isShown {
-            popover.performClose(nil)
+    func toggle(for pane: PaneViewController) {
+        if window?.isVisible == true, self.pane === pane {
+            window?.orderOut(nil)
             return
         }
-        guard let anchor = window.contentView else { return }
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: ViewOptionsView(model: ViewOptionsModel(pane: pane)))
-        // Anchor under the toolbar, near its trailing edge.
-        let safeTop = anchor.safeAreaInsets.top
-        let rect = NSRect(x: anchor.bounds.maxX - 320, y: anchor.bounds.maxY - safeTop - 4, width: 1, height: 1)
-        popover.show(relativeTo: rect, of: anchor, preferredEdge: .minY)
-        self.popover = popover
+        attach(to: pane)
+        if window?.isVisible != true, UserDefaults.standard.string(forKey: "NSWindow Frame DiskiViewOptions") == nil,
+           let browser = pane.view.window, let window {
+            window.setFrameTopLeftPoint(NSPoint(x: browser.frame.maxX + 12 - window.frame.width / 3,
+                                                y: browser.frame.maxY - 40))
+        }
+        window?.orderFront(nil)
+    }
+
+    /// Follows the active pane (window, tab, dual pane or view mode changes).
+    func paneDidChange(_ pane: PaneViewController) {
+        guard window?.isVisible == true else { return }
+        attach(to: pane)
+    }
+
+    private func attach(to pane: PaneViewController) {
+        self.pane = pane
+        rebuild()
+    }
+
+    // MARK: Content
+
+    private func rebuild() {
+        guard let pane, let window else { return }
+        window.title = pane.isSearchResults ? pane.displayTitle : FileManager.default.displayName(atPath: pane.displayedPath)
+        for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
+
+        let mode = pane.viewMode
+        let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for key in SortKey.allCases {
+            sortPopup.addItem(withTitle: key.title)
+            sortPopup.lastItem?.representedObject = key.rawValue
+        }
+        sortPopup.selectItem(at: SortKey.allCases.firstIndex(of: pane.arrangeOptions.sortKey) ?? 0)
+        sortPopup.target = self
+        sortPopup.action = #selector(sortChanged(_:))
+        let orderPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        orderPopup.addItems(withTitles: ["Ascending", "Descending"])
+        orderPopup.selectItem(at: pane.arrangeOptions.ascending ? 0 : 1)
+        orderPopup.target = self
+        orderPopup.action = #selector(orderChanged(_:))
+        var rows: [[NSView]] = [[label("Sort By:"), sortPopup], [label("Order:"), orderPopup]]
+
+        switch mode {
+        case .list:
+            let density = NSPopUpButton(frame: .zero, pullsDown: false)
+            for option in RowDensity.allCases { density.addItem(withTitle: option.menuTitle) }
+            density.selectItem(at: Prefs.rowDensity.rawValue)
+            density.target = self
+            density.action = #selector(densityChanged(_:))
+            rows.append([label("Icon size:"), density])
+        case .icons:
+            let slider = NSSlider(value: Double(Prefs.iconSize), minValue: 32, maxValue: 256,
+                                  target: self, action: #selector(iconSizeChanged(_:)))
+            slider.numberOfTickMarks = 8
+            slider.allowsTickMarkValuesOnly = false
+            slider.widthAnchor.constraint(equalToConstant: 140).isActive = true
+            rows.append([label("Icon size:"), slider])
+            rows.append([NSGridCell.emptyContentView, valueLabel("\(Int(Prefs.iconSize)) × \(Int(Prefs.iconSize))")])
+        default:
+            break
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        stack.addArrangedSubview(grid)
+
+        stack.addArrangedSubview(checkbox("Keep folders on top", Prefs.foldersOnTop, #selector(toggleFoldersOnTop(_:))))
+
+        if mode == .list {
+            stack.addArrangedSubview(separator())
+            stack.addArrangedSubview(heading("Show Columns:"))
+            let visible = Set(Prefs.listColumns)
+            for column in ListColumn.allCases where column != .name {
+                let box = checkbox(column.title, visible.contains(column.rawValue), #selector(toggleColumn(_:)))
+                box.identifier = NSUserInterfaceItemIdentifier(column.rawValue)
+                let indent = NSStackView(views: [box])
+                indent.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 0)
+                stack.addArrangedSubview(indent)
+            }
+            stack.setCustomSpacing(6, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 1])
+        }
+
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(checkbox("Calculate all sizes", Prefs.calculateFolderSizes, #selector(toggleSizes(_:))))
+        if mode == .list || mode == .icons {
+            stack.addArrangedSubview(checkbox("Show icon preview", Prefs.showThumbnailsInList, #selector(togglePreviews(_:))))
+        }
+        stack.addArrangedSubview(checkbox("Show hidden files", Prefs.showHiddenFiles, #selector(toggleHidden(_:))))
+
+        let defaults = NSButton(title: "Use as Defaults", target: self, action: #selector(useAsDefaults))
+        defaults.bezelStyle = .push
+        let centered = NSStackView(views: [defaults])
+        centered.alignment = .centerX
+        stack.addArrangedSubview(centered)
+        centered.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+        stack.setCustomSpacing(16, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
+
+        for view in stack.arrangedSubviews where view is NSBox {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+        }
+        fit()
+    }
+
+    private func fit() {
+        guard let window else { return }
+        stack.layoutSubtreeIfNeeded()
+        let size = NSSize(width: 270, height: stack.fittingSize.height)
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: window.isVisible)
+    }
+
+    private func label(_ text: String) -> NSTextField {
+        NSTextField(labelWithString: text)
+    }
+
+    private func valueLabel(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.textColor = .secondaryLabelColor
+        return field
+    }
+
+    private func heading(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        return field
+    }
+
+    private func separator() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        return box
+    }
+
+    private func checkbox(_ title: String, _ on: Bool, _ action: Selector) -> NSButton {
+        let box = NSButton(checkboxWithTitle: title, target: self, action: action)
+        box.state = on ? .on : .off
+        return box
+    }
+
+    // MARK: Actions
+
+    private func applying(_ body: () -> Void) {
+        isApplying = true
+        body()
+        isApplying = false
+    }
+
+    @objc private func sortChanged(_ sender: NSPopUpButton) {
+        guard let pane, let raw = sender.selectedItem?.representedObject as? String, let key = SortKey(rawValue: raw) else { return }
+        pane.setSort(key, ascending: key.defaultAscending)
+        rebuild()
+    }
+
+    @objc private func orderChanged(_ sender: NSPopUpButton) {
+        guard let pane else { return }
+        pane.setSort(pane.arrangeOptions.sortKey, ascending: sender.indexOfSelectedItem == 0)
+    }
+
+    @objc private func densityChanged(_ sender: NSPopUpButton) {
+        guard let density = RowDensity(rawValue: sender.indexOfSelectedItem) else { return }
+        applying { Prefs.rowDensity = density }
+    }
+
+    @objc private func iconSizeChanged(_ sender: NSSlider) {
+        let size = CGFloat(sender.doubleValue.rounded())
+        applying { Prefs.iconSize = size }
+        if let grid = stack.arrangedSubviews.first as? NSGridView, grid.numberOfRows > 3,
+           let value = grid.cell(atColumnIndex: 1, rowIndex: 3).contentView as? NSTextField {
+            value.stringValue = "\(Int(size)) × \(Int(size))"
+        }
+    }
+
+    @objc private func toggleFoldersOnTop(_ sender: NSButton) {
+        applying { Prefs.foldersOnTop = sender.state == .on }
+    }
+
+    @objc private func toggleColumn(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue else { return }
+        var columns = Prefs.listColumns
+        if sender.state == .on {
+            if !columns.contains(raw) { columns.append(raw) }
+        } else {
+            columns.removeAll { $0 == raw }
+        }
+        applying { Prefs.listColumns = columns }
+    }
+
+    @objc private func toggleSizes(_ sender: NSButton) {
+        applying { Prefs.calculateFolderSizes = sender.state == .on }
+    }
+
+    @objc private func togglePreviews(_ sender: NSButton) {
+        applying { Prefs.showThumbnailsInList = sender.state == .on }
+    }
+
+    @objc private func toggleHidden(_ sender: NSButton) {
+        applying { Prefs.showHiddenFiles = sender.state == .on }
+    }
+
+    @objc private func useAsDefaults() {
+        guard let pane else { return }
+        applying {
+            Prefs.defaultViewMode = pane.viewMode
+            Prefs.sortKey = pane.arrangeOptions.sortKey
+            Prefs.sortAscending = pane.arrangeOptions.ascending
+        }
+    }
+}
+
+private extension RowDensity {
+    var menuTitle: String {
+        switch self {
+        case .compact: return "Small"
+        case .regular: return "Medium"
+        case .comfortable: return "Large"
+        }
     }
 }

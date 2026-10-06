@@ -696,8 +696,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         delegate?.paneRequestsQuickLook(self)
     }
 
+    /// ⌘I: a native Info window for each selected item (or this folder).
     @objc func getInfo(_ sender: Any?) {
-        delegate?.paneRequestsInspector(self)
+        let targets = selectedItems.isEmpty ? [displayedPath] : selectedItems.map { $0.path }
+        for path in targets.prefix(10) { InfoWindowController.show(path: path) }
     }
 
     @objc func showOriginal(_ sender: Any?) {
@@ -976,8 +978,6 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(paths.joined(separator: "\n"), forType: .string)
-        (view.window?.windowController as? BrowserWindowController)?.showToast(
-            paths.count == 1 ? "Copied path" : "Copied \(paths.count) paths", symbol: "doc.on.clipboard")
     }
 
     @objc private func operationDidFinish(_ notification: Notification) {

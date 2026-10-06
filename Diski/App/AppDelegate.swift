@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var controllers: [BrowserWindowController] = []
@@ -25,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         FileOperationManager.shared.conflictPresenter = { source, existing, operation, completion in
             ConflictDialog.present(source: source, existing: existing, operation: operation, completion: completion)
         }
+        // Opens Finder's "Copy" window by itself for operations that take a while.
+        _ = ProgressWindowController.shared
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         _ = VolumeMonitor.shared
@@ -229,8 +230,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Keyboard shortcuts window
 
-struct ShortcutsView: View {
-    private let groups: [(String, [(String, String)])] = [
+/// Help › Diski Keyboard Shortcuts: a plain native window with the shortcuts
+/// in a two-column grid.
+enum ShortcutsWindow {
+    private static var window: NSWindow?
+
+    private static let groups: [(String, [(String, String)])] = [
         ("Navigate", [
             ("⌘[ / ⌘]", "Back / Forward"),
             ("⌘↑", "Enclosing folder"),
@@ -243,6 +248,7 @@ struct ShortcutsView: View {
         ("Files", [
             ("Return", "Rename (configurable to Open)"),
             ("Space", "Quick Look"),
+            ("⌘I", "Get Info"),
             ("⌘C / ⌘X / ⌘V", "Copy / Cut / Paste (cut really moves)"),
             ("⌥⌘V", "Move here"),
             ("⌥⌘C", "Copy path"),
@@ -253,6 +259,7 @@ struct ShortcutsView: View {
         ]),
         ("View", [
             ("⌘1 – ⌘4", "Icons, List, Columns, Gallery"),
+            ("⌘J", "View Options"),
             ("⇧⌘.", "Show hidden files"),
             ("⌘\\", "Dual pane · F5 copy · F6 move to other pane"),
             ("Tab", "Switch pane"),
@@ -261,39 +268,38 @@ struct ShortcutsView: View {
         ]),
     ]
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                ForEach(groups, id: \.0) { group in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(group.0).font(.system(size: 13, weight: .semibold))
-                        ForEach(group.1, id: \.0) { entry in
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(entry.0)
-                                    .font(.system(size: 12, design: .rounded).weight(.medium))
-                                    .frame(width: 190, alignment: .leading)
-                                Text(entry.1)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(22)
-        }
-        .frame(width: 520, height: 560)
-    }
-}
-
-enum ShortcutsWindow {
-    private static var window: NSWindow?
-
     static func show() {
         if window == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: ShortcutsView()))
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 18
+            stack.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 22, right: 22)
+            for (title, entries) in groups {
+                let heading = NSTextField(labelWithString: title)
+                heading.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+                let grid = NSGridView(views: entries.map { keys, meaning in
+                    let key = NSTextField(labelWithString: keys)
+                    key.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+                    let text = NSTextField(labelWithString: meaning)
+                    text.font = .systemFont(ofSize: 12)
+                    text.textColor = .secondaryLabelColor
+                    return [key, text]
+                })
+                grid.rowSpacing = 6
+                grid.columnSpacing = 16
+                grid.column(at: 0).width = 190
+                grid.rowAlignment = .firstBaseline
+                let group = NSStackView(views: [heading, grid])
+                group.orientation = .vertical
+                group.alignment = .leading
+                group.spacing = 8
+                stack.addArrangedSubview(group)
+            }
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: stack.fittingSize),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.contentView = stack
             window.title = "Diski Keyboard Shortcuts"
-            window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()
             self.window = window
@@ -365,6 +371,12 @@ enum CIDriver {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { controller.showOperations(nil) }
             }
             pane.content.focus()
+            if defaults.bool(forKey: "DiskiCIViewOptions") {
+                controller.showViewOptions(nil)
+            }
+            if defaults.bool(forKey: "DiskiCIGetInfo") {
+                pane.getInfo(nil)
+            }
         }
     }
 }
