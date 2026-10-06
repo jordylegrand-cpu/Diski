@@ -16,7 +16,15 @@ final class FolderSizer {
     private var cache: [String: Result] = [:]
     private var jobs: [String: Walk] = [:]
     private var waiting: [String: [(Result) -> Void]] = [:]
-    private let queue = DispatchQueue(label: "app.diski.foldersize", qos: .utility, attributes: .concurrent)
+    /// Two walks at a time; each walk is itself parallel.
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "app.diski.foldersize"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+    private var operations: [String: Operation] = [:]
     private let maxAge: TimeInterval = 180
 
     func cached(_ path: String) -> Result? {
@@ -43,12 +51,13 @@ final class FolderSizer {
         walk.onProgress = progress.map { callback in
             { bytes in DispatchQueue.main.async { callback(bytes) } }
         }
-        queue.async { [weak self] in
-            let (bytes, items) = walk.run()
+        let operation = BlockOperation { [weak self] in
+            let (bytes, items) = walk.isCancelled ? (0, 0) : walk.run()
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.jobs[path] === walk else { return }
                 self.jobs.removeValue(forKey: path)
+                self.operations.removeValue(forKey: path)
                 guard !walk.isCancelled else {
                     self.waiting.removeValue(forKey: path)
                     return
@@ -59,11 +68,23 @@ final class FolderSizer {
                 for callback in callbacks { callback(result) }
             }
         }
+        operations[path] = operation
+        queue.addOperation(operation)
+    }
+
+    /// Cancels pending and running walks of the direct children of `parent`
+    /// (called when the user leaves a folder).
+    func cancelJobs(inside parent: String) {
+        let prefix = parent == "/" ? "/" : parent + "/"
+        for path in Array(jobs.keys) where path.hasPrefix(prefix) && !path.dropFirst(prefix.count).contains("/") {
+            cancel(path)
+        }
     }
 
     func cancel(_ path: String) {
         jobs[path]?.cancel()
         jobs.removeValue(forKey: path)
+        operations.removeValue(forKey: path)?.cancel()
         waiting.removeValue(forKey: path)
     }
 

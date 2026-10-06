@@ -204,7 +204,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     }
 
     private func setLocation(_ path: String, select paths: [String]) {
-        if !currentPath.isEmpty { DirectoryStore.shared.endWatching(currentPath) }
+        if !currentPath.isEmpty {
+            DirectoryStore.shared.endWatching(currentPath)
+            FolderSizer.shared.cancelJobs(inside: currentPath)
+        }
         currentPath = path
         DirectoryStore.shared.beginWatching(path)
         pendingSelection = Set(paths)

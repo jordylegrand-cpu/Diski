@@ -34,7 +34,7 @@ enum ListColumn: String, CaseIterable {
         }
     }
 
-    var minWidth: CGFloat { self == .name ? 160 : 60 }
+    var minWidth: CGFloat { self == .name ? 120 : 60 }
     var alignment: NSTextAlignment { self == .size ? .right : .left }
 
     init?(sortKey: SortKey) {
@@ -244,7 +244,9 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        // The Name column absorbs the width instead (a horizontal scroller would
+        // feed back into the fitted width and loop with legacy scroll bars).
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
@@ -260,14 +262,16 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     }
 
     private var fittedWidth: CGFloat = 0
+    private var isFitting = false
 
     override func viewDidLayout() {
         super.viewDidLayout()
         let width = scrollView.contentView.bounds.width
-        if abs(width - fittedWidth) > 0.5 {
-            fittedWidth = width
-            fitColumns()
-        }
+        guard !isFitting, abs(width - fittedWidth) > 0.5 else { return }
+        fittedWidth = width
+        isFitting = true
+        fitColumns()
+        isFitting = false
     }
 
     /// Like Finder, the Name column takes whatever width the other columns leave.

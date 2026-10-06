@@ -10,7 +10,13 @@ final class IconCache {
 
     private let typeIcons = NSCache<NSString, NSImage>()
     private let itemIcons = NSCache<NSString, NSImage>()
-    private let queue = DispatchQueue(label: "app.diski.icons", qos: .userInitiated, attributes: .concurrent)
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "app.diski.icons"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 4
+        return queue
+    }()
     private var waiting: [String: [(NSImage) -> Void]] = [:]
     private let home = NSHomeDirectory()
 
@@ -75,7 +81,7 @@ final class IconCache {
             return
         }
         waiting[path] = [completion]
-        queue.async { [weak self] in
+        queue.addOperation { [weak self] in
             let icon = NSWorkspace.shared.icon(forFile: path)
             DispatchQueue.main.async {
                 guard let self else { return }
