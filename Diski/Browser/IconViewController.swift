@@ -262,7 +262,7 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
 
     private func configureLayout() {
         let size = Prefs.iconSize
-        layout.itemSize = NSSize(width: max(size + 48, 104), height: size + 50)
+        layout.itemSize = NSSize(width: max(size + 56, 120), height: size + 50)
         layout.minimumInteritemSpacing = 6
         layout.minimumLineSpacing = 10
         layout.sectionInset = NSEdgeInsets(top: 14, left: 16, bottom: 20, right: 16)

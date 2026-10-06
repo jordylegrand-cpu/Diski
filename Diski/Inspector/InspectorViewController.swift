@@ -106,6 +106,11 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
 
         preview.imageScaling = .scaleProportionallyUpOrDown
         preview.translatesAutoresizingMaskIntoConstraints = false
+        // A thumbnail's own size must never widen the pane.
+        for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            preview.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: axis)
+            preview.setContentHuggingPriority(NSLayoutConstraint.Priority(100), for: axis)
+        }
         previewBox.translatesAutoresizingMaskIntoConstraints = false
         previewBox.addSubview(preview)
         previewHeight = previewBox.heightAnchor.constraint(equalToConstant: 260)

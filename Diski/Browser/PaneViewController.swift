@@ -34,12 +34,13 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     private let contentContainer = NSView()
     let bottomBar = BottomBarView()
     private let message = PaneMessageView()
-    private let activeIndicator = NSView()
     private var pendingSelection: Set<String> = []
     private var pendingRename: String?
     private var resortScheduled = false
     private var loadingToken = 0
     private var freeSpaceCache: (path: String, bytes: Int64?, at: Date)?
+    /// Narrow panes (dual pane) leave out the free space to make room for the path.
+    private var isNarrow = false
 
     // Search
     private(set) var searchText = ""
@@ -51,11 +52,18 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     private var modeBeforeSearch: ViewMode?
 
     var isSearchResults: Bool { searchEngine != nil }
+    /// In dual pane the other pane's path bar fades back; the focused pane's
+    /// selection is blue and the other's gray, like any two lists on macOS.
     var isActive = false {
-        didSet { activeIndicator.isHidden = !(isActive && showsActiveIndicator) }
+        didSet { updateActiveAppearance() }
     }
     var showsActiveIndicator = false {
-        didSet { activeIndicator.isHidden = !(isActive && showsActiveIndicator) }
+        didSet { updateActiveAppearance() }
+    }
+
+    private func updateActiveAppearance() {
+        guard isViewLoaded else { return }
+        bottomBar.alphaValue = showsActiveIndicator && !isActive ? 0.45 : 1
     }
 
     init(path: String, viewMode: ViewMode) {
@@ -85,15 +93,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         message.translatesAutoresizingMaskIntoConstraints = false
         scopeBar.translatesAutoresizingMaskIntoConstraints = false
-        activeIndicator.translatesAutoresizingMaskIntoConstraints = false
-        activeIndicator.wantsLayer = true
-        activeIndicator.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        activeIndicator.isHidden = true
         root.addSubview(contentContainer)
         root.addSubview(message)
         root.addSubview(bottomBar)
         root.addSubview(scopeBar)
-        root.addSubview(activeIndicator)
         scopeBar.isHidden = true
         scopeBar.onVisibilityChange = { [weak self] visible in
             self?.contentContainer.additionalSafeAreaInsets = NSEdgeInsets(top: visible ? 40 : 0, left: 0, bottom: 0, right: 0)
@@ -111,10 +114,6 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             message.widthAnchor.constraint(lessThanOrEqualTo: contentContainer.widthAnchor, constant: -40),
             scopeBar.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             scopeBar.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 8),
-            activeIndicator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            activeIndicator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            activeIndicator.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            activeIndicator.heightAnchor.constraint(equalToConstant: 2),
         ])
         view = root
 
@@ -415,10 +414,19 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             let total = selection.reduce(Int64(0)) { $0 + max(0, $1.displaySize) }
             if total > 0 { parts.append(Formatters.size(total)) }
         }
-        if !isSearchResults, let free = freeSpace() {
+        if !isSearchResults, !isNarrow, let free = freeSpace() {
             parts.append("\(Formatters.size(free)) available")
         }
         bottomBar.status.stringValue = parts.joined(separator: " · ")
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let narrow = view.bounds.width < 440
+        if narrow != isNarrow {
+            isNarrow = narrow
+            updateBottomBar()
+        }
     }
 
     private func freeSpace() -> Int64? {

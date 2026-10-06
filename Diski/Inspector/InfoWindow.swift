@@ -345,6 +345,9 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         let image = NSImageView()
         image.imageScaling = .scaleProportionallyUpOrDown
         image.translatesAutoresizingMaskIntoConstraints = false
+        for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            image.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: axis)
+        }
         image.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18).isActive = true
         image.heightAnchor.constraint(equalToConstant: 180).isActive = true
         previewLoader.load(item, into: image, points: 180, thumbnails: true)

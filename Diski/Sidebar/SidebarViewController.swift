@@ -199,6 +199,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                            name: NSWindow.didBecomeKeyNotification, object: nil)
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // Finder's first section starts a little closer to the title bar than
+        // a source list's default inset.
+        let top = max(0, view.safeAreaInsets.top - 3)
+        if scrollView.contentInsets.top != top {
+            let atTop = scrollView.contentView.bounds.minY <= -scrollView.contentInsets.top + 1
+            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: 0, right: 0)
+            if atTop {
+                scrollView.contentView.scroll(to: NSPoint(x: 0, y: -top))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        }
+    }
+
     @objc private func sidebarSizeMayHaveChanged() {
         let current = SidebarMetrics.current
         guard current != metrics else { return }
@@ -345,7 +361,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 NSLayoutConstraint.activate([
                     label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
                     // Section titles sit low in their row, close to their items, like Finder's.
-                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor, constant: 5),
+                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor, constant: 3),
                 ])
                 return cell
             }()
