@@ -150,13 +150,13 @@
           "fill-specializations": [
             {
               "value": {
-                "solid": "srgb:1.00000,0.82353,0.92157,1.00000"
+                "solid": "srgb:1.00000,0.60392,0.79608,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "solid": "srgb:0.91373,0.65098,1.00000,1.00000"
+                "solid": "srgb:0.94902,0.65098,0.90196,1.00000"
               }
             }
           ],
@@ -168,13 +168,13 @@
           "fill-specializations": [
             {
               "value": {
-                "solid": "srgb:1.00000,0.82353,0.92157,1.00000"
+                "solid": "srgb:1.00000,0.60392,0.79608,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "solid": "srgb:0.91373,0.65098,1.00000,1.00000"
+                "solid": "srgb:0.94902,0.65098,0.90196,1.00000"
               }
             }
           ],
@@ -186,19 +186,37 @@
           "fill-specializations": [
             {
               "value": {
-                "solid": "srgb:1.00000,0.82353,0.92157,1.00000"
+                "solid": "srgb:1.00000,0.60392,0.79608,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "solid": "srgb:0.91373,0.65098,1.00000,1.00000"
+                "solid": "srgb:0.94902,0.65098,0.90196,1.00000"
               }
             }
           ],
           "glass": true,
           "image-name": "drift-3.svg",
           "name": "Drifting Petal 3"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.60392,0.79608,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.94902,0.65098,0.90196,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "drift-4.svg",
+          "name": "Drifting Petal 4"
         }
       ],
       "lighting": "individual",
