@@ -97,7 +97,7 @@ Help › Diski Keyboard Shortcuts (⇧⌘/) shows the full list.
 
 ## The icon
 
-`Diski/AppIcon.icon` is an Icon Composer document: a warm amber-to-pink face with a frosted Liquid Glass half and a lightning-bolt nose, with dark, tinted and clear variants. Open it in Icon Composer to tweak it.
+`Diski/AppIcon.icon` is an Icon Composer document: the Finder face, with the same equal, concentric margins, in an orchid pink-to-violet gradient, with a frosted Liquid Glass face panel and a glass cherry blossom tucked in like a hair ornament. Dark, tinted and clear variants are included. Open it in Icon Composer to tweak it.
 
 <p align="center"><img src="docs/icon-variants.png" width="720" alt="Icon variants"></p>
 
