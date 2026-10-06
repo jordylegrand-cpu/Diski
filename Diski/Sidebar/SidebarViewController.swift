@@ -198,7 +198,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         // Below the toolbar, like Finder's sidebar (no scroll edge line).
-        let container = NSView()
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 600))
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
         NSLayoutConstraint.activate([
@@ -374,7 +374,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             cell.imageView?.imageScaling = .scaleNone
         } else {
             cell.imageView?.imageScaling = .scaleProportionallyUpOrDown
-            cell.imageView?.contentTintColor = entry.isAccentTinted ? .controlAccentColor : .secondaryLabelColor
+            // Finder's location glyphs are as dark as this on the sidebar.
+            cell.imageView?.contentTintColor = entry.isAccentTinted ? .controlAccentColor : .labelColor
         }
         let ejectable = entry.volume.map { !$0.isRoot && ($0.isEjectable || $0.isRemovable || !$0.isLocal || !$0.isInternal) } ?? false
         cell.eject.isHidden = !ejectable
