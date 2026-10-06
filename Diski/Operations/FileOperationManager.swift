@@ -504,6 +504,11 @@ final class FileOperationManager: NSObject, ConflictResolving {
         dirs += operation.sources.map { $0.deletingLastPathComponent() }
         if let destination = operation.destination { dirs.append(destination) }
         refresh(dirs)
+        // Folder sizes changed too: refresh them now instead of waiting for the
+        // last file-system events (a size read mid-copy would otherwise stick).
+        let touched = (results + operation.sources).map { DirectoryReader.normalized($0.path) }
+        FolderSizer.shared.invalidate(changedPaths: touched)
+        DirectoryStore.shared.noteNestedChanges(touched, minimumDepth: 0)
         NotificationCenter.default.post(name: Self.didFinish, object: operation)
         NotificationCenter.default.post(name: Self.didChange, object: self)
         if !errors.isEmpty && !operation.isCancelled {

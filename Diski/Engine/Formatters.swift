@@ -2,13 +2,32 @@ import Foundation
 
 /// Shared, cached formatters with Finder's display conventions.
 enum Formatters {
-    private static let shortDateTime: DateFormatter = {
+    /// How much room a date has, narrowest first. Like Finder, list columns
+    /// switch to longer formats as they get wider.
+    enum DateLength: Int, CaseIterable {
+        /// "9/20/26", "Today"
+        case dateOnly
+        /// "9/20/26, 8:17 PM", "Today, 5:15 PM"
+        case short
+        /// "Sep 20, 2026 at 8:17 PM", "Today at 5:15 PM"
+        case medium
+        /// "September 20, 2026 at 8:17 PM"
+        case long
+        /// "Sunday, September 20, 2026 at 8:17 PM"
+        case full
+    }
+
+    private static let listDateFormatters: [DateFormatter] = DateLength.allCases.map { length in
         let f = DateFormatter()
-        f.dateStyle = .short
-        f.timeStyle = .short
-        f.doesRelativeDateFormatting = false
+        switch length {
+        case .dateOnly: f.dateStyle = .short; f.timeStyle = .none
+        case .short: f.dateStyle = .short; f.timeStyle = .short
+        case .medium: f.dateStyle = .medium; f.timeStyle = .short
+        case .long: f.dateStyle = .long; f.timeStyle = .short
+        case .full: f.dateStyle = .full; f.timeStyle = .short
+        }
         return f
-    }()
+    }
 
     private static let timeOnly: DateFormatter = {
         let f = DateFormatter()
@@ -53,19 +72,20 @@ enum Formatters {
         dayBoundaries = computeBoundaries()
     }
 
-    /// "Today, 5:15 PM" / "Yesterday, 3:52 PM" / "9/20/26, 8:17 PM".
-    static func listDate(_ seconds: Double) -> String {
+    /// "Today, 5:15 PM" / "Yesterday, 3:52 PM" / "9/20/26, 8:17 PM" (`.short`).
+    static func listDate(_ seconds: Double, length: DateLength = .short) -> String {
         guard seconds > 0 else { return "--" }
         if Date().timeIntervalSince1970 >= dayBoundaries.tomorrow { refreshDayBoundaries() }
         let b = dayBoundaries
         let date = Date(timeIntervalSince1970: seconds)
-        if seconds >= b.today && seconds < b.tomorrow {
-            return "Today, " + timeOnly.string(from: date)
+        let relative = seconds >= b.today && seconds < b.tomorrow ? "Today"
+            : seconds >= b.yesterday && seconds < b.today ? "Yesterday" : nil
+        guard let relative else { return listDateFormatters[length.rawValue].string(from: date) }
+        switch length {
+        case .dateOnly: return relative
+        case .short: return relative + ", " + timeOnly.string(from: date)
+        case .medium, .long, .full: return relative + " at " + timeOnly.string(from: date)
         }
-        if seconds >= b.yesterday && seconds < b.today {
-            return "Yesterday, " + timeOnly.string(from: date)
-        }
-        return shortDateTime.string(from: date)
     }
 
     /// "Sep 20, 2026 at 8:17 PM".
@@ -75,7 +95,10 @@ enum Formatters {
     }
 
     static func size(_ bytes: Int64) -> String {
-        bytes < 0 ? "--" : byteFormatter.string(fromByteCount: bytes)
+        if bytes < 0 { return "--" }
+        // Finder's wording for empty items (the formatter would say "Zero KB").
+        if bytes == 0 { return "Zero bytes" }
+        return byteFormatter.string(fromByteCount: bytes)
     }
 
     static func preciseSize(_ bytes: Int64) -> String {

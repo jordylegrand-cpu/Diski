@@ -28,6 +28,9 @@ final class InspectorViewController: NSViewController {
     let model = InspectorModel()
     private var token = 0
     private var currentKey = ""
+    /// The folder whose size is shown; recalculated when its contents change.
+    private var sizedFolder: (item: FileItem, kind: String)?
+    private var sizeRefreshScheduled = false
 
     var compact: Bool {
         get { model.compact }
@@ -49,6 +52,16 @@ final class InspectorViewController: NSViewController {
         ])
         container.frame = NSRect(x: 0, y: 0, width: 260, height: 600)
         view = container
+
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(folderContentsDidChange(_:)),
+                           name: DirectoryStore.folderContentsDidChange, object: nil)
+        center.addObserver(self, selector: #selector(directoryDidUpdate(_:)),
+                           name: DirectoryStore.didUpdate, object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     /// Shows `items`, or the folder at `folderPath` when nothing is selected.
@@ -58,6 +71,7 @@ final class InspectorViewController: NSViewController {
         currentKey = key
         token += 1
         let token = self.token
+        sizedFolder = nil
 
         var subjects = items
         if subjects.isEmpty, let folderPath, let folder = FileItem.make(path: folderPath) {
@@ -124,6 +138,7 @@ final class InspectorViewController: NSViewController {
 
         // Folder size, computed in the background.
         if item.type == .directory || (item.type == .package && item.size < 0) {
+            sizedFolder = (item, kind)
             if let cached = FolderSizer.shared.cached(item.path) {
                 applyFolderSize(cached, to: item, kind: kind)
             } else {
@@ -160,6 +175,40 @@ final class InspectorViewController: NSViewController {
                     self.model.moreRows.append(InfoRow(label: "Where from", value: whereFrom))
                 }
                 self.model.tags = tags
+            }
+        }
+    }
+
+    // MARK: Live folder size
+
+    @objc private func folderContentsDidChange(_ notification: Notification) {
+        guard let folder = sizedFolder?.item, let paths = notification.userInfo?["paths"] as? Set<String> else { return }
+        let prefix = folder.path + "/"
+        if paths.contains(folder.path) || paths.contains(where: { $0.hasPrefix(prefix) }) {
+            scheduleSizeRefresh()
+        }
+    }
+
+    @objc private func directoryDidUpdate(_ notification: Notification) {
+        // Items added to or removed from the shown folder itself.
+        guard let folder = sizedFolder?.item, let listing = notification.object as? DirectoryStore.Listing,
+              listing.path == folder.path else { return }
+        scheduleSizeRefresh()
+    }
+
+    /// Recalculates at most twice a second and keeps showing the old size meanwhile.
+    private func scheduleSizeRefresh() {
+        guard !sizeRefreshScheduled else { return }
+        sizeRefreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.sizeRefreshScheduled = false
+            guard let sized = self.sizedFolder else { return }
+            let token = self.token
+            FolderSizer.shared.size(of: sized.item.path) { [weak self] result in
+                guard let self, token == self.token else { return }
+                sized.item.computedFolderSize = result.bytes
+                self.applyFolderSize(result, to: sized.item, kind: sized.kind)
             }
         }
     }

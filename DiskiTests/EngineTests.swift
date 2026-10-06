@@ -272,6 +272,53 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(items, expectedItems)
     }
 
+    func testListDatesGetLongerWithRoom() {
+        let past: Double = 1_758_740_280 // September 24, 2025
+        let texts = Formatters.DateLength.allCases.map { Formatters.listDate(past, length: $0) }
+        for (shorter, longer) in zip(texts, texts.dropFirst()) {
+            XCTAssertLessThanOrEqual(shorter.count, longer.count, "\(shorter) vs \(longer)")
+        }
+        XCTAssertLessThan(texts[0].count, texts[1].count)
+
+        let now = Date().timeIntervalSince1970
+        XCTAssertEqual(Formatters.listDate(now, length: .dateOnly), "Today")
+        XCTAssertTrue(Formatters.listDate(now, length: .short).hasPrefix("Today, "))
+        XCTAssertTrue(Formatters.listDate(now, length: .medium).hasPrefix("Today at "))
+        XCTAssertEqual(Formatters.listDate(0), "--")
+        XCTAssertEqual(Formatters.size(0), "Zero bytes")
+    }
+
+    func testFolderSizeThatRacesWithChangesIsNotCached() throws {
+        try makeTree(at: "live", files: 12, depth: 2)
+        let path = root.appendingPathComponent("live").path
+        let sizer = FolderSizer.shared
+
+        // The folder changes while the walk runs: its result is shown but not cached.
+        let first = expectation(description: "stale walk delivered")
+        sizer.size(of: path) { _ in first.fulfill() }
+        sizer.invalidate(changedPaths: [path + "/level0/sub1/new.bin"])
+        XCTAssertFalse(sizer.isComputing(path))
+        wait(for: [first], timeout: 10)
+        XCTAssertNil(sizer.cached(path))
+
+        // Asking again walks the current contents and caches them.
+        let before = FolderSizer.Walk(root: path).run().0
+        try makeFile("live/level0/sub1/new.bin", size: 5000)
+        let second = expectation(description: "fresh walk delivered")
+        var bytes: Int64 = -1
+        sizer.size(of: path) { result in
+            bytes = result.bytes
+            second.fulfill()
+        }
+        wait(for: [second], timeout: 10)
+        XCTAssertEqual(bytes, before + 5000)
+        XCTAssertEqual(sizer.cached(path)?.bytes, before + 5000)
+
+        // A change deep inside drops the cached size of every enclosing folder.
+        sizer.invalidate(changedPaths: [path + "/level1/sub0/file0.bin"])
+        XCTAssertNil(sizer.cached(path))
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {

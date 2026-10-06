@@ -36,7 +36,9 @@ final class FolderSizer {
         return result
     }
 
-    func isComputing(_ path: String) -> Bool { jobs[path] != nil }
+    /// Whether an up-to-date walk of `path` is running (a walk whose folder
+    /// changed while it ran does not count).
+    func isComputing(_ path: String) -> Bool { jobs[path].map { !$0.isStale } ?? false }
 
     /// Computes (or returns the cached) size; `completion` runs on the main thread.
     func size(of path: String, progress: ((Int64) -> Void)? = nil, completion: @escaping (Result) -> Void) {
@@ -45,7 +47,12 @@ final class FolderSizer {
             return
         }
         waiting[path, default: []].append(completion)
-        if jobs[path] != nil { return }
+        if let running = jobs[path] {
+            guard running.isStale else { return }
+            // The folder changed since this walk started: start over, keeping the waiters.
+            running.cancel()
+            operations.removeValue(forKey: path)?.cancel()
+        }
         let walk = Walk(root: path)
         jobs[path] = walk
         walk.onProgress = progress.map { callback in
@@ -63,7 +70,8 @@ final class FolderSizer {
                     return
                 }
                 let result = Result(bytes: bytes, items: items, computedAt: Date())
-                self.cache[path] = result
+                // A walk that raced with changes is still worth showing, but not caching.
+                if !walk.isStale { self.cache[path] = result }
                 let callbacks = self.waiting.removeValue(forKey: path) ?? []
                 for callback in callbacks { callback(result) }
             }
@@ -88,12 +96,25 @@ final class FolderSizer {
         waiting.removeValue(forKey: path)
     }
 
-    /// Drops cached sizes of every folder containing one of `changedPaths`.
+    /// Drops cached sizes of every folder containing one of `changedPaths`, and
+    /// marks walks of those folders that are still running as stale.
     func invalidate(changedPaths: [String]) {
-        guard !cache.isEmpty else { return }
+        guard !cache.isEmpty || !jobs.isEmpty else { return }
+        var seen = Set<String>()
         for changed in changedPaths {
-            for key in cache.keys where changed == key || changed.hasPrefix(key + "/") {
-                cache.removeValue(forKey: key)
+            var path = changed.count > 1 && changed.hasSuffix("/") ? String(changed.dropLast()) : changed
+            // Walk up the ancestors: a few hash lookups per event instead of
+            // comparing every event with every cached folder.
+            while seen.insert(path).inserted {
+                cache.removeValue(forKey: path)
+                jobs[path]?.isStale = true
+                guard let slash = path.lastIndex(of: "/") else { break }
+                if slash == path.startIndex {
+                    if path == "/" { break }
+                    path = "/"
+                } else {
+                    path = String(path[..<slash])
+                }
             }
         }
     }
@@ -101,6 +122,8 @@ final class FolderSizer {
     // MARK: - Parallel walk
 
     final class Walk {
+        /// Set on the main thread when the folder changes while the walk runs.
+        var isStale = false
         private let condition = NSCondition()
         private var stack: [String]
         private var active = 0

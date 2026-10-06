@@ -28,13 +28,22 @@ enum ListColumn: String, CaseIterable {
     var defaultWidth: CGFloat {
         switch self {
         case .name: return 420
-        case .modified, .created, .added: return 168
+        case .modified, .created, .added: return 150
         case .size: return 84
-        case .kind: return 128
+        case .kind: return 124
         }
     }
 
-    var minWidth: CGFloat { self == .name ? 120 : 60 }
+    var minWidth: CGFloat {
+        switch self {
+        case .name: return 120
+        case .modified, .created, .added: return 72
+        case .size: return 56
+        case .kind: return 64
+        }
+    }
+
+    var isDate: Bool { self == .modified || self == .created || self == .added }
     var alignment: NSTextAlignment { self == .size ? .right : .left }
 
     init?(sortKey: SortKey) {
@@ -254,6 +263,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
         NotificationCenter.default.addObserver(self, selector: #selector(directoryDidUpdate(_:)),
                                                name: DirectoryStore.didUpdate, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(folderContentsDidChange(_:)),
+                                               name: DirectoryStore.folderContentsDidChange, object: nil)
     }
 
     deinit {
@@ -263,6 +274,14 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
     private var fittedWidth: CGFloat = 0
     private var isFitting = false
+    private static let columnWidthsKey = "DiskiListColumnWidths"
+    /// Widths the user gave the columns other than Name. Narrow panes shrink
+    /// columns below these; they grow back when there is room again.
+    private var preferredWidths: [String: CGFloat] =
+        (UserDefaults.standard.dictionary(forKey: ListViewController.columnWidthsKey) as? [String: Double])?
+            .mapValues { CGFloat($0) } ?? [:]
+    /// The date format each date column has room for.
+    private var dateLengths: [String: Formatters.DateLength] = [:]
 
     override func viewDidLayout() {
         super.viewDidLayout()
@@ -274,13 +293,103 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         isFitting = false
     }
 
-    /// Like Finder, the Name column takes whatever width the other columns leave.
+    /// Like Finder, the Name column takes the width the other columns leave. In
+    /// narrow panes it keeps a fair share and the other columns shrink in
+    /// proportion (down to their minimums) instead of being cut off.
     private func fitColumns() {
-        guard let name = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue)) else { return }
+        let columns = outlineView.tableColumns
+        guard let name = columns.first(where: { $0.identifier.rawValue == ListColumn.name.rawValue }) else { return }
+        let others = columns.filter { $0 !== name }
+        for column in others { column.width = preferredWidth(of: column) }
         outlineView.tile()
-        let excess = outlineView.frame.width - scrollView.contentView.bounds.width
-        guard abs(excess) > 0.5 else { return }
-        name.width = max(name.minWidth, name.width - excess)
+        // The total the columns may use: the visible width minus the table's
+        // insets and spacing (the trailing inset mirrors the leading one).
+        let leading = outlineView.rect(ofColumn: 0).minX
+        let needed = outlineView.rect(ofColumn: columns.count - 1).maxX + leading
+        let total = columns.reduce(0) { $0 + $1.width } + scrollView.contentView.bounds.width - needed
+        let othersWidth = others.reduce(0) { $0 + $1.width }
+        let nameShare = max(name.minWidth, (total * 0.4).rounded())
+        if total - othersWidth >= nameShare {
+            name.width = total - othersWidth
+        } else {
+            let scale = othersWidth > 0 ? max(0, total - nameShare) / othersWidth : 1
+            var used: CGFloat = 0
+            for column in others {
+                column.width = max(column.minWidth, (column.width * scale).rounded(.down))
+                used += column.width
+            }
+            name.width = max(name.minWidth, total - used)
+        }
+        for column in others { updateDateLength(for: column) }
+    }
+
+    private func preferredWidth(of column: NSTableColumn) -> CGFloat {
+        let id = column.identifier.rawValue
+        return preferredWidths[id] ?? ListColumn(rawValue: id)?.defaultWidth ?? column.width
+    }
+
+    func outlineViewColumnDidResize(_ notification: Notification) {
+        guard let column = notification.userInfo?["NSTableColumn"] as? NSTableColumn,
+              let kind = ListColumn(rawValue: column.identifier.rawValue) else { return }
+        // Remember widths the user drags; fitting and autoresizing are not choices.
+        if !isFitting, kind != .name, (outlineView.headerView?.resizedColumn ?? -1) >= 0 {
+            preferredWidths[kind.rawValue] = column.width
+            UserDefaults.standard.set(preferredWidths.mapValues { Double($0) }, forKey: Self.columnWidthsKey)
+        }
+        updateDateLength(for: column)
+    }
+
+    /// Date thresholds: the width each format needs, narrowest format first.
+    private static var dateFormatWidths: [CGFloat] = []
+
+    /// The longest date format that fits a column `width` points wide.
+    private static func dateLength(forWidth width: CGFloat) -> Formatters.DateLength {
+        if dateFormatWidths.isEmpty {
+            // A long weekday and month, a two-digit day and hour: Wednesday, September 24, 2025, 12:58.
+            var components = DateComponents()
+            components.year = 2025
+            components.month = 9
+            components.day = 24
+            components.hour = 12
+            components.minute = 58
+            let sample = Calendar.current.date(from: components)?.timeIntervalSince1970 ?? 0
+            let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            dateFormatWidths = Formatters.DateLength.allCases.map { length in
+                let text = Formatters.listDate(sample, length: length) as NSString
+                return ceil(text.size(withAttributes: [.font: font]).width) + 10
+            }
+        }
+        var best = Formatters.DateLength.dateOnly
+        for length in Formatters.DateLength.allCases where dateFormatWidths[length.rawValue] <= width {
+            best = length
+        }
+        return best
+    }
+
+    private func updateDateLength(for column: NSTableColumn) {
+        guard let kind = ListColumn(rawValue: column.identifier.rawValue), kind.isDate else { return }
+        let length = Self.dateLength(forWidth: column.width)
+        guard dateLengths[kind.rawValue] != length else { return }
+        dateLengths[kind.rawValue] = length
+        let index = outlineView.column(withIdentifier: column.identifier)
+        let rows = outlineView.rows(in: outlineView.visibleRect)
+        guard index >= 0, rows.length > 0 else { return }
+        outlineView.reloadData(forRowIndexes: IndexSet(integersIn: rows.location..<NSMaxRange(rows)),
+                               columnIndexes: IndexSet(integer: index))
+    }
+
+    private func makeTableColumn(_ column: ListColumn) -> NSTableColumn {
+        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
+        tableColumn.title = column.title
+        tableColumn.width = column == .name ? column.defaultWidth : preferredWidths[column.rawValue] ?? column.defaultWidth
+        tableColumn.minWidth = column.minWidth
+        tableColumn.maxWidth = column == .name ? 4000 : 600
+        tableColumn.headerCell.alignment = column.alignment
+        tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
+                                                               ascending: column.sortKey.defaultAscending)
+        // Name always fills the row: widen it by narrowing the other columns.
+        tableColumn.resizingMask = column == .name ? .autoresizingMask : .userResizingMask
+        return tableColumn
     }
 
     private func buildColumns() {
@@ -288,15 +397,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         var columns: [ListColumn] = [.name]
         columns += Prefs.listColumns.compactMap { ListColumn(rawValue: $0) }.filter { $0 != .name }
         for column in columns {
-            let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
-            tableColumn.title = column.title
-            tableColumn.width = column.defaultWidth
-            tableColumn.minWidth = column.minWidth
-            tableColumn.maxWidth = column == .name ? 4000 : 600
-            tableColumn.headerCell.alignment = column.alignment
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
-                                                                   ascending: column.sortKey.defaultAscending)
-            tableColumn.resizingMask = column == .name ? [.autoresizingMask, .userResizingMask] : .userResizingMask
+            let tableColumn = makeTableColumn(column)
             outlineView.addTableColumn(tableColumn)
             if column == .name { outlineView.outlineTableColumn = tableColumn }
         }
@@ -319,6 +420,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         guard isViewLoaded else { return }
         if reset {
             collapseAllWatching()
+            sizeRequests.removeAll()
             outlineView.reloadData()
             outlineView.scrollRowToVisible(0)
             syncSortIndicator()
@@ -444,37 +546,90 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let cell = outlineView.makeView(withIdentifier: Self.textCellID, owner: self) as? TextCellView
             ?? { let c = TextCellView(); c.identifier = Self.textCellID; return c }()
         cell.label.alignment = column.alignment
+        // Like Finder, long kinds keep both ends ("Icon Comp… Icon").
+        cell.label.lineBreakMode = column == .kind ? .byTruncatingMiddle : .byTruncatingTail
         cell.label.stringValue = text(for: item, column: column)
         return cell
     }
 
     private func text(for item: FileItem, column: ListColumn) -> String {
+        let length = dateLengths[column.rawValue] ?? .short
         switch column {
         case .name: return item.name
-        case .modified: return Formatters.listDate(item.modified)
-        case .created: return Formatters.listDate(item.created)
-        case .added: return item.added > 0 ? Formatters.listDate(item.added) : "--"
+        case .modified: return Formatters.listDate(item.modified, length: length)
+        case .created: return Formatters.listDate(item.created, length: length)
+        case .added: return item.added > 0 ? Formatters.listDate(item.added, length: length) : "--"
         case .kind: return FileKinds.kind(for: item)
         case .size:
+            if item.displaySize < 0 && (item.type == .directory || item.type == .package) {
+                requestSize(for: item)
+            }
+            // A cached size is applied right away by the request above.
             let size = item.displaySize
-            if size >= 0 { return Formatters.size(size) }
-            if item.type == .directory || item.type == .package { requestSize(for: item) }
-            return "--"
+            return size >= 0 ? Formatters.size(size) : "--"
         }
     }
 
-    private func requestSize(for item: FileItem) {
+    /// Folders with a size request from this list still pending.
+    private var sizeRequests = Set<String>()
+
+    /// Starts (or joins) a size calculation. `refreshing` re-requests a size the
+    /// item already shows because its contents changed.
+    private func requestSize(for item: FileItem, refreshing: Bool = false) {
         guard Prefs.calculateFolderSizes, !isFlat || item.type == .package else { return }
-        if let cached = FolderSizer.shared.cached(item.path) {
+        let path = item.path
+        if let cached = FolderSizer.shared.cached(path) {
+            let changed = cached.bytes != item.computedFolderSize
             item.computedFolderSize = cached.bytes
+            if refreshing && changed { reloadSizeCell(for: item) }
             return
         }
-        guard !FolderSizer.shared.isComputing(item.path) else { return }
-        FolderSizer.shared.size(of: item.path) { [weak self, weak item] result in
-            guard let self, let item else { return }
+        // Cells are configured over and over: one request per folder, unless the
+        // walk it joined has gone out of date.
+        guard !sizeRequests.contains(path) || !FolderSizer.shared.isComputing(path) else { return }
+        sizeRequests.insert(path)
+        FolderSizer.shared.size(of: path) { [weak self, weak item] result in
+            guard let self else { return }
+            self.sizeRequests.remove(path)
+            guard let item else { return }
             item.computedFolderSize = result.bytes
             self.reloadSizeCell(for: item)
         }
+    }
+
+    // Sizes of shown folders whose contents changed are recalculated at most
+    // twice a second, so a long copy updates the list without flooding it.
+    private var pendingSizeRefresh = Set<String>()
+    private var sizeRefreshScheduled = false
+
+    @objc private func folderContentsDidChange(_ notification: Notification) {
+        guard Prefs.calculateFolderSizes, isViewLoaded,
+              let paths = notification.userInfo?["paths"] as? Set<String> else { return }
+        pendingSizeRefresh.formUnion(paths)
+        guard !sizeRefreshScheduled else { return }
+        sizeRefreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.refreshPendingSizes()
+        }
+    }
+
+    private func refreshPendingSizes() {
+        sizeRefreshScheduled = false
+        let paths = pendingSizeRefresh
+        pendingSizeRefresh.removeAll()
+        for path in paths {
+            guard let item = shownItem(atPath: path), item.type == .directory || item.type == .package else { continue }
+            requestSize(for: item, refreshing: true)
+        }
+    }
+
+    /// The item for `path` if it is listed at the top level or in an expanded folder.
+    private func shownItem(atPath path: String) -> FileItem? {
+        let parent = (path as NSString).deletingLastPathComponent
+        let name = (path as NSString).lastPathComponent
+        if isFlat { return items.first { $0.path == path } }
+        if parent == directoryPath { return items.first { $0.name == name } }
+        return childCache[parent]?.first { $0.name == name }
     }
 
     private func reloadSizeCell(for item: FileItem) {
@@ -643,17 +798,11 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
             }
         } else {
             columns.append(raw)
-            let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(raw))
-            tableColumn.title = column.title
-            tableColumn.width = column.defaultWidth
-            tableColumn.minWidth = column.minWidth
-            tableColumn.headerCell.alignment = column.alignment
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
-                                                                   ascending: column.sortKey.defaultAscending)
-            tableColumn.resizingMask = .userResizingMask
-            outlineView.addTableColumn(tableColumn)
+            outlineView.addTableColumn(makeTableColumn(column))
         }
         Prefs.listColumns = columns
+        fittedWidth = 0
+        view.needsLayout = true
     }
 
     // MARK: Drag and drop

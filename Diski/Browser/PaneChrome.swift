@@ -10,6 +10,13 @@ final class BottomBarView: NSView {
     private let separator = NSBox()
     var onNavigate: ((URL) -> Void)?
     var onIconSizeChange: ((CGFloat) -> Void)?
+    /// Drops on the path's folders, like Finder: the operation a drag onto a
+    /// folder would perform, and performing it.
+    var dropOperation: ((NSDraggingInfo, String) -> NSDragOperation)?
+    var performDrop: ((NSDraggingInfo, String) -> Bool)?
+    private var dropHighlight: NSRect? {
+        didSet { if dropHighlight != oldValue { needsDisplay = true } }
+    }
 
     private var statusToSlider: NSLayoutConstraint!
     private var statusToEdge: NSLayoutConstraint!
@@ -33,6 +40,9 @@ final class BottomBarView: NSView {
         pathControl.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         pathControl.backgroundColor = .clear
         pathControl.isEditable = false
+        // Drops are handled by the bar (into the folder under the pointer), so
+        // the control must not claim them to change its own URL.
+        pathControl.unregisterDraggedTypes()
         pathControl.focusRingType = .none
         pathControl.target = self
         pathControl.action = #selector(pathClicked(_:))
@@ -75,9 +85,54 @@ final class BottomBarView: NSView {
         statusToSlider = status.trailingAnchor.constraint(equalTo: slider.leadingAnchor, constant: -10)
         statusToEdge = status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)
         statusToEdge.isActive = true
+        // The bar, not the (read-only) path control, takes drops on path folders.
+        registerForDraggedTypes(PaneViewController.acceptedDragTypes)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: Drops on path folders
+
+    /// The folder in the path under a drag, and its frame in this view.
+    private func dropFolder(for info: NSDraggingInfo) -> (path: String, frame: NSRect)? {
+        guard let cell = pathControl.cell as? NSPathCell else { return nil }
+        let point = pathControl.convert(info.draggingLocation, from: nil)
+        guard pathControl.bounds.contains(point),
+              let component = cell.pathComponentCell(at: point, withFrame: pathControl.bounds, in: pathControl),
+              let url = component.url else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              !NSWorkspace.shared.isFilePackage(atPath: url.path) else { return nil }
+        let frame = cell.rect(of: component, withFrame: pathControl.bounds, in: pathControl)
+        return (DirectoryReader.normalized(url.path), convert(frame, from: pathControl))
+    }
+
+    private func validateDrop(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard let folder = dropFolder(for: info),
+              let operation = dropOperation?(info, folder.path), !operation.isEmpty else {
+            dropHighlight = nil
+            return []
+        }
+        dropHighlight = folder.frame
+        return operation
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { validateDrop(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { validateDrop(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropHighlight = nil }
+    override func draggingEnded(_ sender: NSDraggingInfo) { dropHighlight = nil }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dropHighlight = nil
+        guard let folder = dropFolder(for: sender) else { return false }
+        return performDrop?(sender, folder.path) ?? false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let dropHighlight else { return }
+        NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
+        NSBezierPath(roundedRect: dropHighlight.insetBy(dx: -4, dy: -1), xRadius: 5, yRadius: 5).fill()
+    }
 
     func setPath(_ url: URL) {
         if pathControl.url != url { pathControl.url = url }

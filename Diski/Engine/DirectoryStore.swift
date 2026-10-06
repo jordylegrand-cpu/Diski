@@ -12,6 +12,10 @@ final class DirectoryStore {
     static let shared = DirectoryStore()
     /// Posted on the main thread. `object` is the `Listing`; userInfo["changes"] is `Changes`.
     static let didUpdate = Notification.Name("DiskiDirectoryDidUpdate")
+    /// Posted on the main thread when something changed deeper inside folders
+    /// listed in a watched directory, so views can refresh those folders' sizes.
+    /// userInfo["paths"] is a `Set<String>` of the affected folders.
+    static let folderContentsDidChange = Notification.Name("DiskiFolderContentsDidChange")
 
     struct Changes {
         var inserted: [FileItem] = []
@@ -49,7 +53,30 @@ final class DirectoryStore {
         watcher.onChange = { [weak self] directories, rawPaths in
             FolderSizer.shared.invalidate(changedPaths: rawPaths)
             self?.reload(paths: directories)
+            self?.noteNestedChanges(rawPaths)
         }
+    }
+
+    /// Finds the folders, listed in watched directories, that contain a changed
+    /// path below their own level (a file written inside them changes their
+    /// size without touching their own attributes). With `minimumDepth` 0 the
+    /// changed paths count as changed folders themselves.
+    func noteNestedChanges(_ rawPaths: [String], minimumDepth: Int = 1) {
+        guard !watchCounts.isEmpty else { return }
+        var folders = Set<String>()
+        for raw in rawPaths {
+            var child = raw.count > 1 && raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+            var depth = 0
+            while let slash = child.lastIndex(of: "/") {
+                let parent = slash == child.startIndex ? "/" : String(child[..<slash])
+                if depth >= minimumDepth && watchCounts[parent] != nil { folders.insert(child) }
+                if parent == "/" || parent == child { break }
+                child = parent
+                depth += 1
+            }
+        }
+        guard !folders.isEmpty else { return }
+        NotificationCenter.default.post(name: Self.folderContentsDidChange, object: self, userInfo: ["paths": folders])
     }
 
     /// The (possibly not yet loaded) listing for `path`.

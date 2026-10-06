@@ -119,6 +119,8 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         view = root
 
         bottomBar.onNavigate = { [weak self] url in self?.navigate(to: url.path) }
+        bottomBar.dropOperation = { [weak self] info, path in self?.dragOperation(for: info, destination: path) ?? [] }
+        bottomBar.performDrop = { [weak self] info, path in self?.performDrop(info, destination: path) ?? false }
         bottomBar.onIconSizeChange = { [weak self] size in
             Prefs.iconSize = size
             self?.content.appearanceSettingsDidChange()
