@@ -1,0 +1,15 @@
+# Xcode
+build/
+build-tests/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+
+# Packaging
+*.zip
+*.dmg

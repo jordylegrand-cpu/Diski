@@ -1,0 +1,106 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test & screenshot
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+          system_profiler SPDisplaysDataType | grep -E "Resolution|Display Type|UI Looks" || true
+          ls -d /Applications/Xcode* || true
+          defaults read -g NSTableViewDefaultSizeMode || echo "NSTableViewDefaultSizeMode not set"
+
+      - name: Build (Release)
+        run: |
+          set -o pipefail
+          xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            build 2>&1 | tee build.log | grep -E "error:|BUILD|\*\*" || true
+          grep -q "BUILD SUCCEEDED" build.log
+          ls -la build/Build/Products/Release/Diski.app/Contents/Resources || true
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          grep -E "error:" build.log | sort -u | head -250 || true
+          echo "-----"
+          grep -E "error:" -A3 build.log | head -150 || true
+
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build-tests \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            test 2>&1 | tee test.log | grep -E "error:|Test Case|Executed|\*\*|XCTAssert|failed|DISKI-BENCH" || true
+          grep -q "TEST SUCCEEDED" test.log
+
+      - name: Render app icon with Icon Composer
+        if: always()
+        run: |
+          mkdir -p shots
+          ICTOOL="$(dirname "$(xcode-select -p)")/Applications/Icon Composer.app/Contents/Executables/ictool"
+          if [ -x "$ICTOOL" ]; then
+            "$ICTOOL" --version || true
+            for r in Default Dark ClearLight ClearDark TintedLight TintedDark; do
+              "$ICTOOL" Diski/AppIcon.icon --export-image --output-file "shots/icon-$r.png" \
+                --platform macOS --rendition $r --width 512 --height 512 --scale 1 || echo "ictool failed for $r"
+            done
+          else
+            echo "ictool not found"
+          fi
+
+      - name: Launch & screenshot
+        if: always()
+        run: |
+          mkdir -p shots
+          APP="$PWD/build/Build/Products/Release/Diski.app"
+          test -d "$APP" || exit 0
+          defaults write com.apple.dock autohide -bool true && killall Dock || true
+          bash .github/scripts/demo-content.sh "$HOME/Showcase" > shots/demo-content.txt 2>&1 || true
+          bash .github/scripts/screenshots.sh "$APP" "$PWD/shots" "$HOME/Showcase"
+          # Finder itself, same window frame, for side-by-side comparison.
+          bash .github/scripts/finder-shots.sh "$PWD/shots" "$HOME/Showcase" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: shots/
+
+      - name: Package app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Release/Diski.app Diski.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Diski-app
+          path: Diski.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            build.log
+            test.log
