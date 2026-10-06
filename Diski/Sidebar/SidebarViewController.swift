@@ -3,6 +3,7 @@ import AppKit
 protocol SidebarViewControllerDelegate: AnyObject {
     func sidebarDidSelect(path: String)
     func sidebarDidSelectTag(_ tag: String)
+    func sidebarDidSelectRecents()
     func sidebarRequestsDrop(_ info: NSDraggingInfo, destination: String) -> Bool
     func sidebarDragOperation(_ info: NSDraggingInfo, destination: String) -> NSDragOperation
 }
@@ -19,7 +20,7 @@ final class SidebarSection {
 
 final class SidebarEntry {
     enum Kind: Equatable {
-        case favorite, home, iCloud, volume, airDrop, network, trash, tag(Int)
+        case recents, favorite, home, iCloud, volume, airDrop, network, trash, tag(Int)
     }
 
     let kind: Kind
@@ -36,23 +37,20 @@ final class SidebarEntry {
         self.volume = volume
     }
 
-    var isAccentTinted: Bool { kind == .favorite }
+    var isAccentTinted: Bool { kind == .favorite || kind == .recents }
 }
 
-/// Finder's sidebar metrics for the sidebar size chosen in System Settings ›
-/// Appearance (medium is the default): Finder's rows are a little tighter
-/// and its text a point smaller than a standard source list's.
+/// Finder's glyph sizes for the system sidebar sizes. Rows and names come
+/// from the source list itself (the same as Finder's on the same Mac).
 struct SidebarMetrics: Equatable {
-    let fontSize: CGFloat
-    let rowHeight: CGFloat
     let symbolSize: CGFloat
     let iconBox: CGFloat
 
-    static var current: SidebarMetrics {
-        switch UserDefaults.standard.integer(forKey: "NSTableViewDefaultSizeMode") {
-        case 1: return SidebarMetrics(fontSize: 11, rowHeight: 22, symbolSize: 14, iconBox: 18)
-        case 3: return SidebarMetrics(fontSize: 14, rowHeight: 34, symbolSize: 19, iconBox: 26)
-        default: return SidebarMetrics(fontSize: 12, rowHeight: 28, symbolSize: 16, iconBox: 22)
+    static func forRowSize(_ size: NSTableView.RowSizeStyle) -> SidebarMetrics {
+        switch size {
+        case .small: return SidebarMetrics(symbolSize: 12.5, iconBox: 20)
+        case .large: return SidebarMetrics(symbolSize: 18, iconBox: 28)
+        default: return SidebarMetrics(symbolSize: 15, iconBox: 24)
         }
     }
 }
@@ -116,13 +114,14 @@ final class SidebarCellView: NSTableCellView {
         addSubview(eject)
         imageView = icon
         textField = label
-        iconWidth = icon.widthAnchor.constraint(equalToConstant: 20)
-        iconHeight = icon.heightAnchor.constraint(equalToConstant: 20)
+        iconWidth = icon.widthAnchor.constraint(equalToConstant: 24)
+        iconHeight = icon.heightAnchor.constraint(equalToConstant: 24)
+        // Finder's positions: glyphs centered 13 pt into the row, names 32 pt in.
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconWidth, iconHeight,
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             eject.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
             eject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
@@ -139,7 +138,6 @@ final class SidebarCellView: NSTableCellView {
         appliedMetrics = metrics
         // Finder's sidebar glyphs are a little heavier than regular symbols.
         imageView?.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: metrics.symbolSize, weight: .medium)
-        textField?.font = .systemFont(ofSize: metrics.fontSize)
         iconWidth.constant = metrics.iconBox
         iconHeight.constant = metrics.iconBox
     }
@@ -155,7 +153,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var sections: [SidebarSection] = []
     private var isHighlighting = false
     private var highlightedPath: String?
-    private var metrics = SidebarMetrics.current
+    private var topEntries: [SidebarEntry] = []
+    /// Stands for Recents in `highlight(path:)`.
+    static let recentsMarker = "diski:recents"
     private let contextMenu = NSMenu()
     private static let favoriteDragType = NSPasteboard.PasteboardType("app.diski.sidebar-favorite")
 
@@ -167,9 +167,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outlineView.headerView = nil
         outlineView.style = .sourceList
         outlineView.floatsGroupRows = false
-        outlineView.rowSizeStyle = .custom
-        outlineView.rowHeight = metrics.rowHeight
-        outlineView.intercellSpacing = NSSize(width: 3, height: 2)
+        // The system's sidebar sizes (System Settings › Appearance), exactly
+        // like Finder's sidebar on the same Mac.
+        outlineView.rowSizeStyle = .default
         outlineView.indentationPerLevel = 0
         outlineView.autoresizesOutlineColumn = false
         outlineView.backgroundColor = .clear
@@ -194,36 +194,6 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(sourcesChanged), name: VolumeMonitor.didChange, object: nil)
         center.addObserver(self, selector: #selector(sourcesChanged), name: Prefs.didChange, object: nil)
-        // The sidebar size can change in System Settings while Diski runs.
-        center.addObserver(self, selector: #selector(sidebarSizeMayHaveChanged),
-                           name: NSWindow.didBecomeKeyNotification, object: nil)
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        // Finder's first section starts a little closer to the title bar than
-        // a source list's default inset.
-        let top = max(0, view.safeAreaInsets.top - 3)
-        if scrollView.contentInsets.top != top {
-            let atTop = scrollView.contentView.bounds.minY <= -scrollView.contentInsets.top + 1
-            scrollView.automaticallyAdjustsContentInsets = false
-            scrollView.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: 0, right: 0)
-            if atTop {
-                scrollView.contentView.scroll(to: NSPoint(x: 0, y: -top))
-                scrollView.reflectScrolledClipView(scrollView.contentView)
-            }
-        }
-    }
-
-    @objc private func sidebarSizeMayHaveChanged() {
-        let current = SidebarMetrics.current
-        guard current != metrics else { return }
-        metrics = current
-        outlineView.rowHeight = current.rowHeight
-        let expanded = sections.filter { outlineView.isItemExpanded($0) }
-        outlineView.reloadData()
-        for section in expanded { outlineView.expandItem(section) }
-        highlight(path: highlightedPath)
     }
 
     deinit {
@@ -257,6 +227,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         lastFavorites = Prefs.favorites
         lastVolumes = VolumeMonitor.shared.volumes
 
+        // Like Finder: Recents above the sections, without a title.
+        topEntries = [SidebarEntry(kind: .recents, title: "Recents", path: Self.recentsMarker,
+                                   image: SidebarIcons.image(symbol: "clock"))]
+
         let favorites = SidebarSection(id: "favorites", title: "Favorites")
         for path in lastFavorites where fm.fileExists(atPath: path) {
             favorites.entries.append(SidebarEntry(kind: .favorite, title: fm.displayName(atPath: path), path: path,
@@ -278,7 +252,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                                   volume: volume))
         }
         locations.entries.append(SidebarEntry(kind: .airDrop, title: "AirDrop", path: nil,
-                                              image: SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
+                                              image: SidebarIcons.image(symbol: "airdrop")
+                                                ?? SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
         for volume in volumes where !volume.isInternal {
             let core = volume.isLocal ? (volume.isRemovable ? "SidebarRemovableDisk" : "SidebarExternalDisk") : "SidebarServerDrive"
             let symbol = volume.isLocal ? "externaldrive" : "server.rack"
@@ -310,8 +285,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outlineView.deselectAll(nil)
             return
         }
-        for section in sections {
-            if let entry = section.entries.first(where: { $0.path == path }) {
+        for entries in [topEntries] + sections.map({ $0.entries }) {
+            if let entry = entries.first(where: { $0.path == path }) {
                 let row = outlineView.row(forItem: entry)
                 if row >= 0 {
                     outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -326,12 +301,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if let section = item as? SidebarSection { return section.entries.count }
-        return item == nil ? sections.count : 0
+        return item == nil ? topEntries.count + sections.count : 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if let section = item as? SidebarSection { return section.entries[index] }
-        return sections[index]
+        return index < topEntries.count ? topEntries[index] : sections[index - topEntries.count]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -353,15 +328,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 let cell = NSTableCellView()
                 cell.identifier = id
                 let label = NSTextField(labelWithString: "")
-                label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-                label.textColor = .secondaryLabelColor
                 label.translatesAutoresizingMaskIntoConstraints = false
                 cell.addSubview(label)
                 cell.textField = label
                 NSLayoutConstraint.activate([
                     label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                    // Section titles sit low in their row, close to their items, like Finder's.
-                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor, constant: 3),
+                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                 ])
                 return cell
             }()
@@ -376,7 +348,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return cell
         }()
         cell.textField?.stringValue = entry.title
-        cell.apply(metrics)
+        cell.apply(SidebarMetrics.forRowSize(outlineView.effectiveRowSizeStyle))
         cell.imageView?.image = entry.image
         if case .tag = entry.kind {
             cell.imageView?.contentTintColor = nil
@@ -402,6 +374,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isHighlighting, let entry = outlineView.item(atRow: outlineView.selectedRow) as? SidebarEntry else { return }
         switch entry.kind {
+        case .recents:
+            highlightedPath = Self.recentsMarker
+            delegate?.sidebarDidSelectRecents()
         case .airDrop:
             AppDelegate.openAirDropWindow()
             highlight(path: highlightedPath)

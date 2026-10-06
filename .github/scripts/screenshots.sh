@@ -37,7 +37,8 @@ shoot() {
   sleep 0.4
 }
 
-shoot list     -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "6aaad54bb2b1e1dde7d2ff9c_OLDERNEW" -DiskiCIExpand "Misc"
+shoot list     -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "6aaad54bb2b1e1dde7d2ff9c_OLDERNEW" -DiskiCIExpand "Misc" -DiskiCIDiagnostics YES
+grep "DIAG" "$OUT/list.log" | head -150 || true
 shoot columns  -DiskiCIPath "$DEMO/Misc" -DiskiCIViewMode 2 -DiskiCISelect "p2qkn5l7k2bp0mc0"
 shoot viewoptions -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCIViewOptions YES
 shoot getinfo  -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "Hill and Houses, Cape Elizabeth, Maine – Edward Hopper – 1927.jpg" -DiskiCIGetInfo YES

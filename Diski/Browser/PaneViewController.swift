@@ -566,6 +566,23 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         delegate?.paneDidChangeLocation(self)
     }
 
+    /// Finder's Recents: documents opened in the last month.
+    func showRecents() {
+        searchTag = "Recents"
+        searchText = ""
+        searchEngine?.cancel()
+        enterResultsMode()
+        let engine = SearchEngine.recents { [weak self] results, done in
+            self?.receiveSearchResults(results.filter { !$0.isDirectoryOnDisk || ($0.type == .package && !$0.isApplication) },
+                                       done: done)
+        }
+        searchEngine = engine
+        engine.start()
+        delegate?.paneDidChangeLocation(self)
+    }
+
+    var isShowingRecents: Bool { isSearchResults && searchTag == "Recents" }
+
     private func startSearchEngine() {
         searchEngine?.cancel()
         searchTag = nil

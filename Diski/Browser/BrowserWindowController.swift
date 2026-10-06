@@ -215,7 +215,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateWindowTitle()
         updateToolbarState()
         updateInspector()
-        sidebar.highlight(path: pane.displayedPath)
+        sidebar.highlight(path: sidebarPath(for: pane))
         searchItem?.searchField.stringValue = pane.searchText
         ViewOptionsPanel.shared.paneDidChange(pane)
     }
@@ -261,7 +261,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateWindowTitle()
         updateToolbarState()
         updateInspector()
-        sidebar.highlight(path: pane.isSearchResults ? nil : pane.displayedPath)
+        sidebar.highlight(path: sidebarPath(for: pane))
         ViewOptionsPanel.shared.paneDidChange(pane)
     }
 
@@ -315,6 +315,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func sidebarDidSelectTag(_ tag: String) {
         activePane.showTag(tag)
+    }
+
+    func sidebarDidSelectRecents() {
+        activePane.showRecents()
+    }
+
+    private func sidebarPath(for pane: PaneViewController) -> String? {
+        if pane.isShowingRecents { return SidebarViewController.recentsMarker }
+        return pane.isSearchResults ? nil : pane.displayedPath
     }
 
     func sidebarRequestsDrop(_ info: NSDraggingInfo, destination: String) -> Bool {
@@ -575,7 +584,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        sidebar.highlight(path: activePane.isSearchResults ? nil : activePane.displayedPath)
+        sidebar.highlight(path: sidebarPath(for: activePane))
     }
 
     // MARK: - Toolbar

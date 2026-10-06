@@ -45,6 +45,14 @@ final class SearchEngine: NSObject {
                             handler: handler)
     }
 
+    /// Files opened in the last 30 days (Finder's Recents).
+    static func recents(handler: @escaping Handler) -> SearchEngine {
+        let since = Date().addingTimeInterval(-30 * 24 * 3600) as NSDate
+        let predicate = NSPredicate(format: "kMDItemLastUsedDate >= %@", since)
+        return SearchEngine(kind: .spotlight(predicate: predicate, scopes: [NSMetadataQueryUserHomeScope]),
+                            handler: handler)
+    }
+
     func start() {
         isRunning = true
         switch kind {
