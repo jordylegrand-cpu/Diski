@@ -8,6 +8,8 @@ DEMO="$3"
 mkdir -p "$OUT"
 # Non-zero when Diski quit or crashed during a shot.
 FAILED=0
+# Let the Dock finish hiding, so the first window gets the full screen.
+sleep 3
 
 shoot() {
   local name="$1"; shift
@@ -50,7 +52,9 @@ SHOT_DELAY=3.4 shoot clone -DiskiCIPath "$DEMO/Clones" -DiskiCIViewMode 1 \
 
 DEV=$(hdiutil attach -nomount ram://6291456 2>/dev/null | awk '{print $1}')
 if [ -n "$DEV" ] && diskutil erasevolume APFS "Fast Drive" "$DEV" >/dev/null 2>&1; then
-  SHOT_DELAY=5.5 shoot copy -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
+  # Late enough for the copy to finish on a slow runner (the result stays in
+  # the operations popover for 6 s).
+  SHOT_DELAY=9 shoot copy -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
     -DiskiCICopy "$DEMO/Big Media|/Volumes/Fast Drive" -DiskiCIShowOperations YES
   ls -la "/Volumes/Fast Drive" "/Volumes/Fast Drive/Big Media" 2>/dev/null | head -8
   hdiutil detach "$DEV" -force >/dev/null 2>&1

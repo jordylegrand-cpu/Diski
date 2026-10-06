@@ -76,7 +76,7 @@ jobs:
           test -d "$APP" || exit 0
           defaults write com.apple.dock autohide -bool true && killall Dock || true
           bash .github/scripts/demo-content.sh "$HOME/Showcase" > shots/demo-content.txt 2>&1 || true
-          SAMPLE_SHOTS=1 bash .github/scripts/screenshots.sh "$APP" "$PWD/shots" "$HOME/Showcase"
+          bash .github/scripts/screenshots.sh "$APP" "$PWD/shots" "$HOME/Showcase"
 
       - name: Publish screenshots to a hidden ref
         if: always() && github.event_name == 'push'

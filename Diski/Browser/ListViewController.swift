@@ -38,7 +38,7 @@ enum ListColumn: String, CaseIterable {
         switch self {
         case .name: return 110
         case .modified, .created, .added: return 64
-        case .size: return 68
+        case .size: return 74 // "Zero bytes", "999.9 MB"
         case .kind: return 64
         }
     }
