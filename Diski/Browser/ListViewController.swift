@@ -259,6 +259,26 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         for path in expanded.keys { DirectoryStore.shared.endWatching(path) }
     }
 
+    private var fittedWidth: CGFloat = 0
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = scrollView.contentView.bounds.width
+        if abs(width - fittedWidth) > 0.5 {
+            fittedWidth = width
+            fitColumns()
+        }
+    }
+
+    /// Like Finder, the Name column takes whatever width the other columns leave.
+    private func fitColumns() {
+        guard let name = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue)) else { return }
+        outlineView.tile()
+        let excess = outlineView.frame.width - scrollView.contentView.bounds.width
+        guard abs(excess) > 0.5 else { return }
+        name.width = max(name.minWidth, name.width - excess)
+    }
+
     private func buildColumns() {
         for column in outlineView.tableColumns { outlineView.removeTableColumn(column) }
         var columns: [ListColumn] = [.name]
@@ -278,6 +298,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         }
         outlineView.headerView?.menu = headerMenu
         syncSortIndicator()
+        fittedWidth = 0
+        view.needsLayout = true
     }
 
     func syncSortIndicator() {
@@ -380,7 +402,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         guard !isFlat, let file = item as? FileItem else { return false }
-        return file.isNavigable && file.childCount != 0
+        return file.type == .directory && file.childCount != 0
     }
 
     // MARK: Expansion

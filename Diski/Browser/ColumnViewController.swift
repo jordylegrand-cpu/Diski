@@ -138,6 +138,37 @@ final class ColumnPreviewView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// Lays columns out side by side with fixed widths. Manual layout keeps the
+/// horizontal scroller's document view from driving the window's size.
+final class ColumnsDocumentView: NSView {
+    override var isFlipped: Bool { true }
+    private(set) var entries: [(view: NSView, width: CGFloat)] = []
+
+    var contentWidth: CGFloat { entries.reduce(0) { $0 + $1.width } }
+
+    func append(_ view: NSView, width: CGFloat) {
+        view.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(view)
+        entries.append((view, width))
+        needsLayout = true
+    }
+
+    func remove(_ view: NSView) {
+        entries.removeAll { $0.view === view }
+        view.removeFromSuperview()
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        var x: CGFloat = 0
+        for entry in entries {
+            entry.view.frame = NSRect(x: x, y: 0, width: entry.width, height: bounds.height)
+            x += entry.width
+        }
+    }
+}
+
 /// Finder's column view: one column per folder from the volume root down,
 /// with a preview column when a file is selected.
 final class ColumnViewController: FileViewController, NSTableViewDataSource, NSTableViewDelegate,
@@ -148,7 +179,6 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         let scroll = NSScrollView()
         let table = ColumnTableView()
         let separator = NSBox()
-        var widthConstraint: NSLayoutConstraint?
 
         init(path: String, items: [FileItem]) {
             self.path = path
@@ -157,7 +187,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     }
 
     private let scrollView = NSScrollView()
-    private let stack = NSStackView()
+    private let document = ColumnsDocumentView()
     private var columns: [Column] = []
     private var preview: NSView?
     private(set) var activeColumn = 0
@@ -169,28 +199,35 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     private let columnWidth: CGFloat = 236
 
     override func loadView() {
-        stack.orientation = .horizontal
-        stack.alignment = .top
-        stack.distribution = .fill
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = stack
+        document.autoresizingMask = []
+        scrollView.documentView = document
         scrollView.hasHorizontalScroller = true
         scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        let clip = scrollView.contentView
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            stack.topAnchor.constraint(equalTo: clip.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: clip.bottomAnchor),
-            stack.widthAnchor.constraint(greaterThanOrEqualTo: clip.widthAnchor),
-        ])
+        // Each column scrolls (and insets under the toolbar) on its own.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentView.postsFrameChangedNotifications = true
         contextMenu.delegate = self
         view = scrollView
-        NotificationCenter.default.addObserver(self, selector: #selector(directoryDidUpdate(_:)),
-                                               name: DirectoryStore.didUpdate, object: nil)
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(directoryDidUpdate(_:)), name: DirectoryStore.didUpdate, object: nil)
+        center.addObserver(self, selector: #selector(clipResized), name: NSView.frameDidChangeNotification,
+                           object: scrollView.contentView)
+    }
+
+    @objc private func clipResized() {
+        resizeDocument()
+    }
+
+    private func resizeDocument() {
+        let clip = scrollView.contentView.bounds.size
+        let size = NSSize(width: max(document.contentWidth, clip.width), height: clip.height)
+        if document.frame.size != size {
+            document.frame = NSRect(origin: .zero, size: size)
+        }
+        document.needsLayout = true
     }
 
     deinit {
@@ -231,8 +268,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         defer { isSyncing = false }
         for column in columns {
             DirectoryStore.shared.endWatching(column.path)
-            column.scroll.removeFromSuperview()
-            column.separator.removeFromSuperview()
+            document.remove(column.scroll)
+            document.remove(column.separator)
         }
         columns.removeAll()
         removePreview()
@@ -306,20 +343,11 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         column.scroll.autohidesScrollers = true
         column.scroll.drawsBackground = false
         column.scroll.borderType = .noBorder
-        column.scroll.translatesAutoresizingMaskIntoConstraints = false
         column.separator.boxType = .separator
-        column.separator.translatesAutoresizingMaskIntoConstraints = false
 
-        stack.addArrangedSubview(column.scroll)
-        stack.addArrangedSubview(column.separator)
-        let width = column.scroll.widthAnchor.constraint(equalToConstant: columnWidth)
-        width.isActive = true
-        column.widthConstraint = width
-        NSLayoutConstraint.activate([
-            column.scroll.heightAnchor.constraint(equalTo: stack.heightAnchor),
-            column.separator.heightAnchor.constraint(equalTo: stack.heightAnchor),
-            column.separator.widthAnchor.constraint(equalToConstant: 1),
-        ])
+        document.append(column.scroll, width: columnWidth)
+        document.append(column.separator, width: 1)
+        resizeDocument()
         columns.append(column)
         DirectoryStore.shared.beginWatching(path)
         table.reloadData()
@@ -331,30 +359,29 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         while columns.count > index + 1 {
             let column = columns.removeLast()
             DirectoryStore.shared.endWatching(column.path)
-            column.scroll.removeFromSuperview()
-            column.separator.removeFromSuperview()
+            document.remove(column.scroll)
+            document.remove(column.separator)
         }
+        resizeDocument()
     }
 
     private func removePreview() {
-        preview?.removeFromSuperview()
+        if let preview { document.remove(preview) }
         preview = nil
+        resizeDocument()
     }
 
     private func showPreview(for item: FileItem) {
         let view = ColumnPreviewView(item: item)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(view)
-        NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(equalToConstant: 280),
-            view.heightAnchor.constraint(equalTo: stack.heightAnchor),
-        ])
+        document.append(view, width: 300)
         preview = view
+        resizeDocument()
     }
 
     private func scrollToEnd(animated: Bool) {
-        view.layoutSubtreeIfNeeded()
-        let width = stack.fittingSize.width
+        resizeDocument()
+        document.layoutSubtreeIfNeeded()
+        let width = document.contentWidth
         let visible = scrollView.contentView.bounds.width
         let x = max(0, width - visible)
         let point = NSPoint(x: x, y: 0)

@@ -17,13 +17,9 @@ final class EngineTests: XCTestCase {
     private func makeFile(_ relative: String, size: Int = 0, byte: UInt8 = 0x41) throws -> URL {
         let url = root.appendingPathComponent(relative)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        var data = Data(count: size)
-        if size > 0 {
-            data.withUnsafeMutableBytes { buffer in
-                for i in 0..<size { buffer[i] = byte &+ UInt8(truncatingIfNeeded: i % 251) }
-            }
-        }
-        try data.write(to: url)
+        var bytes = [UInt8](repeating: 0, count: size)
+        for i in 0..<size { bytes[i] = byte &+ UInt8(truncatingIfNeeded: i % 251) }
+        try Data(bytes).write(to: url)
         return url
     }
 

@@ -104,7 +104,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
         sidebar.delegate = self
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 160
+        sidebarItem.minimumThickness = 172
         sidebarItem.maximumThickness = 320
         sidebarItem.canCollapse = true
         let contentItem = NSSplitViewItem(viewController: paneContainer)

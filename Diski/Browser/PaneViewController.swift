@@ -95,6 +95,9 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         root.addSubview(scopeBar)
         root.addSubview(activeIndicator)
         scopeBar.isHidden = true
+        scopeBar.onVisibilityChange = { [weak self] visible in
+            self?.contentContainer.additionalSafeAreaInsets = NSEdgeInsets(top: visible ? 40 : 0, left: 0, bottom: 0, right: 0)
+        }
         NSLayoutConstraint.activate([
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),

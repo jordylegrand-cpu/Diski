@@ -38,13 +38,14 @@ final class BottomBarView: NSView {
         pathControl.action = #selector(pathClicked(_:))
         pathControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         pathControl.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        pathControl.clipsToBounds = true
 
         status.translatesAutoresizingMaskIntoConstraints = false
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         status.textColor = .secondaryLabelColor
         status.alignment = .right
         status.lineBreakMode = .byTruncatingHead
-        status.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        status.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
         status.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false
@@ -221,6 +222,11 @@ final class SearchScopeBar: NSView {
     private let control = NSSegmentedControl(labels: ["This Folder", "Subfolders", "This Mac"],
                                              trackingMode: .selectOne, target: nil, action: nil)
     var onScopeChange: ((SearchScope) -> Void)?
+    var onVisibilityChange: ((Bool) -> Void)?
+
+    override var isHidden: Bool {
+        didSet { if oldValue != isHidden { onVisibilityChange?(!isHidden) } }
+    }
 
     var scope: SearchScope = .thisFolder {
         didSet { control.selectedSegment = scope.rawValue }

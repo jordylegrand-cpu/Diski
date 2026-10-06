@@ -39,41 +39,34 @@ final class SidebarEntry {
     var isAccentTinted: Bool { kind == .favorite }
 }
 
-/// Sidebar glyphs: Finder's own artwork from CoreTypes when available,
-/// SF Symbols otherwise.
+/// Sidebar glyphs (SF Symbols, tinted like Finder's).
 enum SidebarIcons {
-    private static let coreTypes = Bundle(path: "/System/Library/CoreServices/CoreTypes.bundle")
     private static var cache: [String: NSImage] = [:]
 
-    static func image(core: String, symbol: String) -> NSImage? {
-        let key = core + "|" + symbol
-        if let cached = cache[key] { return cached }
-        var image: NSImage?
-        if let found = coreTypes?.image(forResource: core) {
-            found.isTemplate = true
-            image = found
-        }
-        if image == nil {
-            image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        }
-        if let image { cache[key] = image }
+    static func image(core: String = "", symbol: String) -> NSImage? {
+        if let cached = cache[symbol] { return cached }
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        if let image { cache[symbol] = image }
         return image
     }
 
     static func image(forFolder path: String) -> NSImage? {
         let home = NSHomeDirectory()
         switch path {
-        case "/Applications", home + "/Applications": return image(core: "SidebarApplicationsFolder", symbol: "square.stack.3d.up")
-        case home + "/Desktop": return image(core: "SidebarDesktopFolder", symbol: "menubar.dock.rectangle")
-        case home + "/Documents": return image(core: "SidebarDocumentsFolder", symbol: "doc")
-        case home + "/Downloads": return image(core: "SidebarDownloadsFolder", symbol: "arrow.down.circle")
-        case home + "/Movies": return image(core: "SidebarMoviesFolder", symbol: "film")
-        case home + "/Music": return image(core: "SidebarMusicFolder", symbol: "music.note")
-        case home + "/Pictures": return image(core: "SidebarPicturesFolder", symbol: "photo")
-        case home + "/Developer": return image(core: "SidebarDeveloperFolder", symbol: "hammer")
-        case home: return image(core: "SidebarHomeFolder", symbol: "house")
-        case "/Applications/Utilities": return image(core: "SidebarUtilitiesFolder", symbol: "wrench.and.screwdriver")
-        default: return image(core: "SidebarGenericFolder", symbol: "folder")
+        case "/Applications", home + "/Applications": return image(symbol: "square.stack.3d.up")
+        case home + "/Desktop": return image(symbol: "menubar.dock.rectangle")
+        case home + "/Documents": return image(symbol: "doc")
+        case home + "/Downloads": return image(symbol: "arrow.down.circle")
+        case home + "/Movies": return image(symbol: "film")
+        case home + "/Music": return image(symbol: "music.note")
+        case home + "/Pictures": return image(symbol: "photo")
+        case home + "/Developer": return image(symbol: "hammer")
+        case home + "/Library": return image(symbol: "building.columns")
+        case home: return image(symbol: "house")
+        case "/Applications/Utilities": return image(symbol: "wrench.and.screwdriver")
+        case "/": return image(symbol: "internaldrive")
+        default: return image(symbol: "folder")
         }
     }
 }
@@ -219,8 +212,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                                   volume: volume))
         }
         locations.entries.append(SidebarEntry(kind: .airDrop, title: "AirDrop", path: nil,
-                                              image: SidebarIcons.image(core: "SidebarAirDrop", symbol: "airdrop")
-                                                ?? NSImage(systemSymbolName: "dot.radiowaves.left.and.right", accessibilityDescription: nil)))
+                                              image: SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
         for volume in volumes where !volume.isInternal {
             let core = volume.isLocal ? (volume.isRemovable ? "SidebarRemovableDisk" : "SidebarExternalDisk") : "SidebarServerDrive"
             let symbol = volume.isLocal ? "externaldrive" : "server.rack"
