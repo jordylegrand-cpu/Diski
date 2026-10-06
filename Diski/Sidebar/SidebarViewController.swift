@@ -37,49 +37,23 @@ final class SidebarEntry {
         self.volume = volume
     }
 
-    var isAccentTinted: Bool { kind == .favorite || kind == .recents }
 }
 
-/// Finder's glyph sizes for the system sidebar sizes. Rows and names come
-/// from the source list itself (the same as Finder's on the same Mac).
-struct SidebarMetrics: Equatable {
-    let symbolSize: CGFloat
-    let iconBox: CGFloat
-
-    static func forRowSize(_ size: NSTableView.RowSizeStyle) -> SidebarMetrics {
-        switch size {
-        case .small: return SidebarMetrics(symbolSize: 12.5, iconBox: 20)
-        case .large: return SidebarMetrics(symbolSize: 18, iconBox: 28)
-        default: return SidebarMetrics(symbolSize: 15, iconBox: 24)
-        }
-    }
-}
-
-/// Sidebar glyphs (SF Symbols, tinted like Finder's), sized by `SidebarMetrics`.
+/// Sidebar glyphs: plain SF Symbols; the source list sizes and tints them.
 enum SidebarIcons {
     private static var cache: [String: NSImage] = [:]
 
-    /// SF Symbols, or Finder's own artwork from CoreTypes where its current
-    /// glyph has no symbol (Applications' "A", AirDrop).
-    static func image(core: String = "", symbol: String) -> NSImage? {
-        let key = core + "|" + symbol
-        if let cached = cache[key] { return cached }
-        var image: NSImage?
-        if !core.isEmpty,
-           let artwork = NSImage(contentsOfFile: "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/\(core).icns") {
-            artwork.isTemplate = true
-            image = artwork
-        } else {
-            image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        }
-        if let image { cache[key] = image }
+    static func image(symbol: String) -> NSImage? {
+        if let cached = cache[symbol] { return cached }
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        if let image { cache[symbol] = image }
         return image
     }
 
     static func image(forFolder path: String) -> NSImage? {
         let home = NSHomeDirectory()
         switch path {
-        case "/Applications", home + "/Applications": return image(core: "SidebarApplicationsFolder", symbol: "square.stack.3d.up")
+        case "/Applications", home + "/Applications": return image(symbol: "square.stack.3d.up")
         case home + "/Desktop": return image(symbol: "menubar.dock.rectangle")
         case home + "/Documents": return image(symbol: "doc")
         case home + "/Downloads": return image(symbol: "arrow.down.circle")
@@ -96,26 +70,25 @@ enum SidebarIcons {
     }
 }
 
+/// The standard source-list cell (image and text, like AppKit's own
+/// "Image & Text Table Cell View"): the outline view sets its font, row
+/// height, symbol size and colors from the system sidebar settings.
 final class SidebarCellView: NSTableCellView {
     let eject = NSButton()
     var onEject: (() -> Void)?
-    private var iconWidth: NSLayoutConstraint!
-    private var iconHeight: NSLayoutConstraint!
-    private var appliedMetrics: SidebarMetrics?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         let icon = NSImageView()
         let label = NSTextField(labelWithString: "")
-        icon.imageScaling = .scaleNone
         icon.translatesAutoresizingMaskIntoConstraints = false
         label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         eject.translatesAutoresizingMaskIntoConstraints = false
+        eject.bezelStyle = .inline
         eject.isBordered = false
         eject.image = NSImage(systemSymbolName: "eject", accessibilityDescription: "Eject")
-        eject.contentTintColor = .secondaryLabelColor
         eject.target = self
         eject.action = #selector(ejectClicked)
         eject.toolTip = "Eject"
@@ -124,34 +97,19 @@ final class SidebarCellView: NSTableCellView {
         addSubview(eject)
         imageView = icon
         textField = label
-        iconWidth = icon.widthAnchor.constraint(equalToConstant: 24)
-        iconHeight = icon.heightAnchor.constraint(equalToConstant: 24)
-        // Finder's positions: glyphs centered 13 pt into the row, names 32 pt in.
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3.5),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconWidth, iconHeight,
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             eject.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
-            eject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            eject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             eject.centerYAnchor.constraint(equalTo: centerYAnchor),
-            eject.widthAnchor.constraint(equalToConstant: 16),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    /// The glyph is centered in a fixed box so every name starts at the same x.
-    func apply(_ metrics: SidebarMetrics) {
-        guard metrics != appliedMetrics else { return }
-        appliedMetrics = metrics
-        // Finder's sidebar glyphs are a little heavier than regular symbols.
-        imageView?.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: metrics.symbolSize, weight: .medium)
-        // Finder's glyphs are drawn about 19 pt wide at the medium size.
-        iconWidth.constant = metrics.iconBox - 5
-        iconHeight.constant = metrics.iconBox - 5
-    }
 
     @objc private func ejectClicked() { onEject?() }
 }
@@ -273,7 +231,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                                   volume: volume))
         }
         locations.entries.append(SidebarEntry(kind: .airDrop, title: "AirDrop", path: nil,
-                                              image: SidebarIcons.image(core: "SidebarAirDrop", symbol: "dot.radiowaves.left.and.right")))
+                                              image: SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
         for volume in volumes where !volume.isInternal {
                         let symbol = volume.isLocal ? "externaldrive" : "server.rack"
             locations.entries.append(SidebarEntry(kind: .volume, title: volume.name, path: volume.path,
@@ -367,16 +325,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return cell
         }()
         cell.textField?.stringValue = entry.title
-        cell.apply(SidebarMetrics.forRowSize(outlineView.effectiveRowSizeStyle))
         cell.imageView?.image = entry.image
-        if case .tag = entry.kind {
-            cell.imageView?.contentTintColor = nil
-            cell.imageView?.imageScaling = .scaleNone
-        } else {
-            cell.imageView?.imageScaling = .scaleProportionallyUpOrDown
-            // Finder's location glyphs are as dark as this on the sidebar.
-            cell.imageView?.contentTintColor = entry.isAccentTinted ? .controlAccentColor : .labelColor
-        }
         let ejectable = entry.volume.map { !$0.isRoot && ($0.isEjectable || $0.isRemovable || !$0.isLocal || !$0.isInternal) } ?? false
         cell.eject.isHidden = !ejectable
         cell.onEject = { [weak self] in

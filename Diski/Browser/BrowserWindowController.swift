@@ -149,6 +149,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         inspectorItem.minimumThickness = 200
         inspectorItem.maximumThickness = 380
         inspectorItem.titlebarSeparatorStyle = .none
+        // Full height like Finder's preview pane: one surface from the top of
+        // the window, behind the toolbar, to the bottom.
+        inspectorItem.allowsFullHeightLayout = true
         inspectorItem.canCollapse = true
         inspectorItem.isCollapsed = !Prefs.showInspector
         splitController.addSplitViewItem(sidebarItem)

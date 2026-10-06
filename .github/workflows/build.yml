@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -87,6 +87,14 @@ jobs:
         with:
           name: screenshots
           path: shots/
+
+      - name: Publish screenshots to a hidden ref (temporary)
+        if: always() && github.event_name == 'push'
+        run: |
+          cd shots || exit 0
+          git init -q . && git checkout -q -b shots && git add -A
+          git -c user.name=diski-ci -c user.email=ci@diski.invalid commit -q -m "CI screenshots" || exit 0
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" shots:refs/diski-ci/shots || true
 
       - name: Package app
         run: |
