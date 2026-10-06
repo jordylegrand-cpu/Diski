@@ -9,6 +9,9 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build, test & screenshot
@@ -21,7 +24,7 @@ jobs:
         run: |
           sw_vers
           xcodebuild -version
-          ls -d /Applications/Xcode*.app || true
+          xcode-select -p
           system_profiler SPDisplaysDataType | grep -E "Resolution|Display Type|UI Looks" || true
 
       - name: Build (Release)
@@ -32,10 +35,11 @@ jobs:
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
             build 2>&1 | tee build.log | grep -E "error:|warning:|BUILD|\*\*" || true
           test -d build/Build/Products/Release/Diski.app
+          ls -la build/Build/Products/Release/Diski.app/Contents/Resources || true
 
       - name: Show build errors
         if: failure()
-        run: grep -E "error:" -A3 build.log | head -200 || true
+        run: grep -E "error:" -A3 build.log | head -300 || true
 
       - name: Unit tests
         run: |
@@ -43,21 +47,47 @@ jobs:
           xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Debug \
             -destination 'platform=macOS' -derivedDataPath build-tests \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
-            test 2>&1 | tee test.log | grep -E "error:|Test Case|Executed|\*\*" || true
+            test 2>&1 | tee test.log | grep -E "error:|Test Case|Executed|\*\*|XCTAssert|failed" || true
           grep -q "TEST SUCCEEDED" test.log
 
+      - name: Render app icon with Icon Composer
+        if: always()
+        run: |
+          mkdir -p shots
+          ICTOOL="$(dirname "$(xcode-select -p)")/Applications/Icon Composer.app/Contents/Executables/ictool"
+          if [ -x "$ICTOOL" ]; then
+            "$ICTOOL" --version || true
+            for r in Default Dark ClearLight ClearDark TintedLight TintedDark; do
+              "$ICTOOL" Diski/AppIcon.icon --export-image --output-file "shots/icon-$r.png" \
+                --platform macOS --rendition $r --width 512 --height 512 --scale 1 || echo "ictool failed for $r"
+            done
+          else
+            echo "ictool not found"
+          fi
+
       - name: Launch & screenshot
+        if: always()
         run: |
           mkdir -p shots
           APP="$PWD/build/Build/Products/Release/Diski.app"
-          defaults write app.diski.Diski DiskiCIMode -bool YES || true
+          test -d "$APP" || exit 0
           open -n "$APP" --args -DiskiCIMode YES
           sleep 8
           screencapture -x shots/screen.png || echo "screencapture failed"
-          sips -s format jpeg -s formatOptions 70 -Z 1600 shots/screen.png --out shots/screen.jpg >/dev/null || true
+          sips -s format jpeg -s formatOptions 82 shots/screen.png --out shots/screen.jpg >/dev/null || true
+          rm -f shots/screen.png
           ls -la shots
           pgrep -lf Diski || echo "Diski is not running"
-          log show --last 1m --predicate 'process == "Diski"' --style compact 2>/dev/null | tail -40 || true
+
+      - name: Publish screenshots to a hidden ref
+        if: always() && github.event_name == 'push'
+        run: |
+          cd shots || exit 0
+          git init -q .
+          git checkout -q -b shots
+          git add -A
+          git -c user.name=diski-ci -c user.email=ci@diski.invalid commit -q -m "CI screenshots for ${GITHUB_SHA}" || exit 0
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" shots:refs/diski-ci/shots || echo "could not publish screenshots"
 
       - name: Package app
         run: |
@@ -67,12 +97,6 @@ jobs:
         with:
           name: Diski-app
           path: Diski.zip
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: screenshots
-          path: shots/
 
       - uses: actions/upload-artifact@v4
         if: always()
