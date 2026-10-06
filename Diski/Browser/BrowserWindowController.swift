@@ -125,6 +125,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
                               backing: .buffered, defer: false)
         window.minSize = NSSize(width: 620, height: 380)
         window.toolbarStyle = .unified
+        // Finder draws no line under its toolbar: the list header and the
+        // panes themselves separate the toolbar from the content.
+        window.titlebarSeparatorStyle = .none
         window.titleVisibility = .visible
         window.tabbingMode = .automatic
         window.tabbingIdentifier = "app.diski.browser"
@@ -141,9 +144,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebarItem.titlebarSeparatorStyle = .none
         let contentItem = NSSplitViewItem(viewController: paneContainer)
         contentItem.minimumThickness = 360
+        contentItem.titlebarSeparatorStyle = .none
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
         inspectorItem.minimumThickness = 200
         inspectorItem.maximumThickness = 380
+        inspectorItem.titlebarSeparatorStyle = .none
         inspectorItem.canCollapse = true
         inspectorItem.isCollapsed = !Prefs.showInspector
         splitController.addSplitViewItem(sidebarItem)

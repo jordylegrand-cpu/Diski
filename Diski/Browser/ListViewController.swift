@@ -342,9 +342,12 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let insets = contentWidth() - columns.filter { !$0.isHidden }.reduce(0) { $0 + $1.width + spacing }
         func room(for count: Int) -> CGFloat { clip - insets - CGFloat(count + 1) * spacing }
 
+        // Names stay readable (a dozen characters next to the icon) before
+        // any other column is kept.
+        let nameFloor = max(name.minWidth, 120 + Prefs.rowDensity.iconSize)
         var shown = others
         while let leastImportant = shown.min(by: { importance(of: $0) < importance(of: $1) }),
-              name.minWidth + shown.reduce(0, { $0 + $1.minWidth }) > room(for: shown.count) {
+              nameFloor + shown.reduce(0, { $0 + $1.minWidth }) > room(for: shown.count) {
             shown.removeAll { $0 === leastImportant }
         }
         for column in others {

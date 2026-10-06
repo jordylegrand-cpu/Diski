@@ -52,9 +52,13 @@ enum IconLabelLayout {
             let mid = (low + high + 1) / 2
             if measure(String(characters[0..<mid])) <= width { low = mid } else { high = mid - 1 }
         }
+        // Break between words; a dot only when there is no space, hyphen or
+        // underscore ("Truth.m4a" stays together); else wherever it fills up.
         var split = low
-        if let breakIndex = characters[0..<low].lastIndex(where: { " -_.".contains($0) }), breakIndex >= low / 3 {
+        if let breakIndex = characters[0..<low].lastIndex(where: { " -_".contains($0) }), breakIndex >= low / 3 {
             split = breakIndex + 1
+        } else if let dot = characters[0..<low].lastIndex(of: "."), dot >= low / 3 {
+            split = dot + 1
         }
         let first = String(characters[0..<split]).trimmingCharacters(in: .whitespaces)
         let rest = String(characters[split...]).trimmingCharacters(in: .whitespaces)
