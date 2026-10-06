@@ -145,13 +145,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         let contentItem = NSSplitViewItem(viewController: paneContainer)
         contentItem.minimumThickness = 360
         contentItem.titlebarSeparatorStyle = .none
-        inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
+        // The same full-height pane as the sidebar, on the trailing edge, so the
+        // toolbar area above it is one surface with it (like Finder's preview).
+        inspectorItem = NSSplitViewItem(sidebarWithViewController: inspector)
         inspectorItem.minimumThickness = 200
         inspectorItem.maximumThickness = 380
         inspectorItem.titlebarSeparatorStyle = .none
-        // Full height like Finder's preview pane: one surface from the top of
-        // the window, behind the toolbar, to the bottom.
-        inspectorItem.allowsFullHeightLayout = true
         inspectorItem.canCollapse = true
         inspectorItem.isCollapsed = !Prefs.showInspector
         splitController.addSplitViewItem(sidebarItem)

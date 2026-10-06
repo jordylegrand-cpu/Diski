@@ -139,6 +139,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         // The system's sidebar sizes (System Settings › Appearance), exactly
         // like Finder's sidebar on the same Mac.
         outlineView.rowSizeStyle = .default
+        // Like Finder, the sidebar never takes keyboard focus, so its
+        // selection stays the quiet gray one.
+        outlineView.refusesFirstResponder = true
         outlineView.indentationPerLevel = 0
         outlineView.autoresizesOutlineColumn = false
         outlineView.backgroundColor = .clear
