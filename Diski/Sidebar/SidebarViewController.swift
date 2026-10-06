@@ -59,29 +59,39 @@ struct SidebarMetrics: Equatable {
 enum SidebarIcons {
     private static var cache: [String: NSImage] = [:]
 
+    /// Finder's own sidebar artwork (CoreTypes' template images) when the
+    /// system has it, else the closest SF Symbol.
     static func image(core: String = "", symbol: String) -> NSImage? {
-        if let cached = cache[symbol] { return cached }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        if let image { cache[symbol] = image }
+        let key = core + "|" + symbol
+        if let cached = cache[key] { return cached }
+        var image: NSImage?
+        if !core.isEmpty,
+           let artwork = NSImage(contentsOfFile: "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/\(core).icns") {
+            artwork.isTemplate = true
+            image = artwork
+        } else {
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
+        if let image { cache[key] = image }
         return image
     }
 
     static func image(forFolder path: String) -> NSImage? {
         let home = NSHomeDirectory()
         switch path {
-        case "/Applications", home + "/Applications": return image(symbol: "square.stack.3d.up")
-        case home + "/Desktop": return image(symbol: "menubar.dock.rectangle")
-        case home + "/Documents": return image(symbol: "doc")
-        case home + "/Downloads": return image(symbol: "arrow.down.circle")
-        case home + "/Movies": return image(symbol: "film")
-        case home + "/Music": return image(symbol: "music.note")
-        case home + "/Pictures": return image(symbol: "photo")
+        case "/Applications", home + "/Applications": return image(core: "SidebarApplicationsFolder", symbol: "square.stack.3d.up")
+        case home + "/Desktop": return image(core: "SidebarDesktopFolder", symbol: "menubar.dock.rectangle")
+        case home + "/Documents": return image(core: "SidebarDocumentsFolder", symbol: "doc")
+        case home + "/Downloads": return image(core: "SidebarDownloadsFolder", symbol: "arrow.down.circle")
+        case home + "/Movies": return image(core: "SidebarMoviesFolder", symbol: "film")
+        case home + "/Music": return image(core: "SidebarMusicFolder", symbol: "music.note")
+        case home + "/Pictures": return image(core: "SidebarPicturesFolder", symbol: "photo")
         case home + "/Developer": return image(symbol: "hammer")
         case home + "/Library": return image(symbol: "building.columns")
-        case home: return image(symbol: "house")
-        case "/Applications/Utilities": return image(symbol: "wrench.and.screwdriver")
-        case "/": return image(symbol: "internaldrive")
-        default: return image(symbol: "folder")
+        case home: return image(core: "SidebarHomeFolder", symbol: "house")
+        case "/Applications/Utilities": return image(core: "SidebarUtilitiesFolder", symbol: "wrench.and.screwdriver")
+        case "/": return image(core: "SidebarInternalDisk", symbol: "internaldrive")
+        default: return image(core: "SidebarGenericFolder", symbol: "folder")
         }
     }
 }
@@ -118,7 +128,7 @@ final class SidebarCellView: NSTableCellView {
         iconHeight = icon.heightAnchor.constraint(equalToConstant: 24)
         // Finder's positions: glyphs centered 13 pt into the row, names 32 pt in.
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3.5),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconWidth, iconHeight,
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30),
@@ -138,8 +148,9 @@ final class SidebarCellView: NSTableCellView {
         appliedMetrics = metrics
         // Finder's sidebar glyphs are a little heavier than regular symbols.
         imageView?.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: metrics.symbolSize, weight: .medium)
-        iconWidth.constant = metrics.iconBox
-        iconHeight.constant = metrics.iconBox
+        // Finder's glyphs are drawn about 19 pt wide at the medium size.
+        iconWidth.constant = metrics.iconBox - 5
+        iconHeight.constant = metrics.iconBox - 5
     }
 
     @objc private func ejectClicked() { onEject?() }
@@ -186,7 +197,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        view = scrollView
+        // Below the toolbar, like Finder's sidebar (no scroll edge line).
+        let container = NSView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        view = container
 
         rebuild()
         for section in sections { outlineView.expandItem(section) }
@@ -229,7 +250,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         // Like Finder: Recents above the sections, without a title.
         topEntries = [SidebarEntry(kind: .recents, title: "Recents", path: Self.recentsMarker,
-                                   image: SidebarIcons.image(symbol: "clock"))]
+                                   image: SidebarIcons.image(core: "SidebarRecents", symbol: "clock"))]
 
         let favorites = SidebarSection(id: "favorites", title: "Favorites")
         for path in lastFavorites where fm.fileExists(atPath: path) {
@@ -252,8 +273,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                                   volume: volume))
         }
         locations.entries.append(SidebarEntry(kind: .airDrop, title: "AirDrop", path: nil,
-                                              image: SidebarIcons.image(symbol: "airdrop")
-                                                ?? SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
+                                              image: SidebarIcons.image(core: "SidebarAirDrop", symbol: "dot.radiowaves.left.and.right")))
         for volume in volumes where !volume.isInternal {
             let core = volume.isLocal ? (volume.isRemovable ? "SidebarRemovableDisk" : "SidebarExternalDisk") : "SidebarServerDrive"
             let symbol = volume.isLocal ? "externaldrive" : "server.rack"
@@ -352,7 +372,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         cell.imageView?.image = entry.image
         if case .tag = entry.kind {
             cell.imageView?.contentTintColor = nil
+            cell.imageView?.imageScaling = .scaleNone
         } else {
+            cell.imageView?.imageScaling = .scaleProportionallyUpOrDown
             cell.imageView?.contentTintColor = entry.isAccentTinted ? .controlAccentColor : .secondaryLabelColor
         }
         let ejectable = entry.volume.map { !$0.isRoot && ($0.isEjectable || $0.isRemovable || !$0.isLocal || !$0.isInternal) } ?? false

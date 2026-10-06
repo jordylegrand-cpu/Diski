@@ -104,7 +104,9 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         NSLayoutConstraint.activate([
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
+            // Below the toolbar, like Finder's list: nothing scrolls under it,
+            // so macOS draws no scroll edge line there.
+            contentContainer.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             contentContainer.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
             bottomBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
