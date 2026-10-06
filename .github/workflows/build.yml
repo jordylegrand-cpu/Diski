@@ -1,0 +1,83 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test & screenshot
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          ls -d /Applications/Xcode*.app || true
+          system_profiler SPDisplaysDataType | grep -E "Resolution|Display Type|UI Looks" || true
+
+      - name: Build (Release)
+        run: |
+          set -o pipefail
+          xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Release \
+            -destination 'platform=macOS' -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            build 2>&1 | tee build.log | grep -E "error:|warning:|BUILD|\*\*" || true
+          test -d build/Build/Products/Release/Diski.app
+
+      - name: Show build errors
+        if: failure()
+        run: grep -E "error:" -A3 build.log | head -200 || true
+
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build-tests \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            test 2>&1 | tee test.log | grep -E "error:|Test Case|Executed|\*\*" || true
+          grep -q "TEST SUCCEEDED" test.log
+
+      - name: Launch & screenshot
+        run: |
+          mkdir -p shots
+          APP="$PWD/build/Build/Products/Release/Diski.app"
+          defaults write app.diski.Diski DiskiCIMode -bool YES || true
+          open -n "$APP" --args -DiskiCIMode YES
+          sleep 8
+          screencapture -x shots/screen.png || echo "screencapture failed"
+          sips -s format jpeg -s formatOptions 70 -Z 1600 shots/screen.png --out shots/screen.jpg >/dev/null || true
+          ls -la shots
+          pgrep -lf Diski || echo "Diski is not running"
+          log show --last 1m --predicate 'process == "Diski"' --style compact 2>/dev/null | tail -40 || true
+
+      - name: Package app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Release/Diski.app Diski.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Diski-app
+          path: Diski.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: shots/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: |
+            build.log
+            test.log
