@@ -36,10 +36,22 @@ enum ListColumn: String, CaseIterable {
 
     var minWidth: CGFloat {
         switch self {
-        case .name: return 120
-        case .modified, .created, .added: return 72
-        case .size: return 56
+        case .name: return 110
+        case .modified, .created, .added: return 64
+        case .size: return 68
         case .kind: return 64
+        }
+    }
+
+    /// Narrow panes hide the least important columns first.
+    var importance: Int {
+        switch self {
+        case .kind: return 0
+        case .added: return 1
+        case .created: return 2
+        case .modified: return 3
+        case .size: return 4
+        case .name: return 5
         }
     }
 
@@ -294,33 +306,63 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     }
 
     /// Like Finder, the Name column takes the width the other columns leave. In
-    /// narrow panes it keeps a fair share and the other columns shrink in
-    /// proportion (down to their minimums) instead of being cut off.
+    /// narrow panes it keeps a fair share: the other columns shrink in
+    /// proportion (down to their minimums), and the least important ones are
+    /// hidden until there is room, instead of being cut off at the edge.
     private func fitColumns() {
         let columns = outlineView.tableColumns
         guard let name = columns.first(where: { $0.identifier.rawValue == ListColumn.name.rawValue }) else { return }
         let others = columns.filter { $0 !== name }
         for column in others { column.width = preferredWidth(of: column) }
         outlineView.tile()
-        // The total the columns may use: the visible width minus the table's
-        // insets and spacing (the trailing inset mirrors the leading one).
-        let leading = outlineView.rect(ofColumn: 0).minX
-        let needed = outlineView.rect(ofColumn: columns.count - 1).maxX + leading
-        let total = columns.reduce(0) { $0 + $1.width } + scrollView.contentView.bounds.width - needed
-        let othersWidth = others.reduce(0) { $0 + $1.width }
+        let clip = scrollView.contentView.bounds.width
+        let spacing = outlineView.intercellSpacing.width
+        // The table's own insets, measured with the columns shown right now.
+        let insets = contentWidth() - columns.filter { !$0.isHidden }.reduce(0) { $0 + $1.width + spacing }
+        func room(for count: Int) -> CGFloat { clip - insets - CGFloat(count + 1) * spacing }
+
+        var shown = others
+        while let leastImportant = shown.min(by: { importance(of: $0) < importance(of: $1) }),
+              name.minWidth + shown.reduce(0, { $0 + $1.minWidth }) > room(for: shown.count) {
+            shown.removeAll { $0 === leastImportant }
+        }
+        for column in others {
+            let hidden = !shown.contains { $0 === column }
+            if column.isHidden != hidden { column.isHidden = hidden }
+        }
+
+        let total = room(for: shown.count)
+        let othersWidth = shown.reduce(0) { $0 + $1.width }
         let nameShare = max(name.minWidth, (total * 0.4).rounded())
         if total - othersWidth >= nameShare {
             name.width = total - othersWidth
         } else {
             let scale = othersWidth > 0 ? max(0, total - nameShare) / othersWidth : 1
             var used: CGFloat = 0
-            for column in others {
+            for column in shown {
                 column.width = max(column.minWidth, (column.width * scale).rounded(.down))
                 used += column.width
             }
             name.width = max(name.minWidth, total - used)
         }
-        for column in others { updateDateLength(for: column) }
+        // Absorb rounding against the real layout.
+        outlineView.tile()
+        let excess = contentWidth() - clip
+        if abs(excess) > 0.5 { name.width = max(name.minWidth, name.width - excess) }
+        for column in shown { updateDateLength(for: column) }
+    }
+
+    /// The width the shown columns take, with the table's insets (the trailing
+    /// inset mirrors the leading one).
+    private func contentWidth() -> CGFloat {
+        let columns = outlineView.tableColumns
+        guard let first = columns.firstIndex(where: { !$0.isHidden }),
+              let last = columns.lastIndex(where: { !$0.isHidden }) else { return 0 }
+        return outlineView.rect(ofColumn: last).maxX + outlineView.rect(ofColumn: first).minX
+    }
+
+    private func importance(of column: NSTableColumn) -> Int {
+        ListColumn(rawValue: column.identifier.rawValue)?.importance ?? 0
     }
 
     private func preferredWidth(of column: NSTableColumn) -> CGFloat {
@@ -345,18 +387,23 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     /// The longest date format that fits a column `width` points wide.
     private static func dateLength(forWidth width: CGFloat) -> Formatters.DateLength {
         if dateFormatWidths.isEmpty {
-            // A long weekday and month, a two-digit day and hour: Wednesday, September 24, 2025, 12:58.
-            var components = DateComponents()
-            components.year = 2025
-            components.month = 9
-            components.day = 24
-            components.hour = 12
-            components.minute = 58
-            let sample = Calendar.current.date(from: components)?.timeIntervalSince1970 ?? 0
+            // Wide samples: long weekday and month names, two-digit days,
+            // months and hours (Wednesday, September 24 and December 31, 2025).
+            let samples: [Double] = [9, 12].compactMap { (month: Int) -> Double? in
+                var components = DateComponents()
+                components.year = 2025
+                components.month = month
+                components.day = month == 9 ? 24 : 31
+                components.hour = 12
+                components.minute = 58
+                return Calendar.current.date(from: components)?.timeIntervalSince1970
+            }
             let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
             dateFormatWidths = Formatters.DateLength.allCases.map { length in
-                let text = Formatters.listDate(sample, length: length) as NSString
-                return ceil(text.size(withAttributes: [.font: font]).width) + 10
+                let widest = samples.map { sample in
+                    (Formatters.listDate(sample, length: length) as NSString).size(withAttributes: [.font: font]).width
+                }.max() ?? 0
+                return ceil(widest) + 10
             }
         }
         var best = Formatters.DateLength.dateOnly

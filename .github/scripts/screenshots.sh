@@ -6,6 +6,8 @@ APP="$1"
 OUT="$2"
 DEMO="$3"
 mkdir -p "$OUT"
+# Non-zero when Diski quit or crashed during a shot.
+FAILED=0
 
 shoot() {
   local name="$1"; shift
@@ -16,8 +18,13 @@ shoot() {
   if pgrep -x Diski >/dev/null; then
     screencapture -x "$OUT/$name.png" || echo "capture failed: $name"
     sips -s format jpeg -s formatOptions 82 "$OUT/$name.png" --out "$OUT/$name.jpg" >/dev/null 2>&1 && rm -f "$OUT/$name.png"
+    # Where every thread is at capture time (shows a busy or stuck main thread).
+    if [ -n "${SAMPLE_SHOTS:-}" ]; then
+      sample "$(pgrep -x Diski | head -1)" 1 -mayDie -file "$OUT/$name.sample.txt" >/dev/null 2>&1 || true
+    fi
   else
     echo "Diski is not running for $name (crashed?)"
+    FAILED=1
   fi
   pkill -x Diski 2>/dev/null
   sleep 0.4
@@ -43,7 +50,7 @@ SHOT_DELAY=3.4 shoot clone -DiskiCIPath "$DEMO/Clones" -DiskiCIViewMode 1 \
 
 DEV=$(hdiutil attach -nomount ram://6291456 2>/dev/null | awk '{print $1}')
 if [ -n "$DEV" ] && diskutil erasevolume APFS "Fast Drive" "$DEV" >/dev/null 2>&1; then
-  SHOT_DELAY=4.5 shoot copy -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
+  SHOT_DELAY=5.5 shoot copy -DiskiCIPath "/Volumes/Fast Drive" -DiskiCIViewMode 1 \
     -DiskiCICopy "$DEMO/Big Media|/Volumes/Fast Drive" -DiskiCIShowOperations YES
   ls -la "/Volumes/Fast Drive" "/Volumes/Fast Drive/Big Media" 2>/dev/null | head -8
   hdiutil detach "$DEV" -force >/dev/null 2>&1
@@ -51,11 +58,13 @@ else
   echo "RAM disk unavailable"
 fi
 
-# Crash reports, if any
+# Crash reports (.ips) fail the run; other diagnostics are kept for reference.
 for report in "$HOME"/Library/Logs/DiagnosticReports/Diski*; do
   [ -f "$report" ] || continue
-  echo "==== crash report: $report"
+  echo "==== diagnostic report: $report"
   head -c 6000 "$report"
   cp "$report" "$OUT/" 2>/dev/null
+  case "$report" in *.ips) FAILED=1 ;; esac
 done
 ls -la "$OUT"
+exit $FAILED

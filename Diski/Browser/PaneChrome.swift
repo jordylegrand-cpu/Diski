@@ -46,7 +46,9 @@ final class BottomBarView: NSView {
         pathControl.focusRingType = .none
         pathControl.target = self
         pathControl.action = #selector(pathClicked(_:))
-        pathControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Both stay below a split view's holding priority (250), so the bar
+        // never decides how wide a pane is: the path yields first, then the status.
+        pathControl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(230), for: .horizontal)
         pathControl.setContentHuggingPriority(.defaultLow, for: .horizontal)
         pathControl.clipsToBounds = true
 
@@ -55,7 +57,7 @@ final class BottomBarView: NSView {
         status.textColor = .secondaryLabelColor
         status.alignment = .right
         status.lineBreakMode = .byTruncatingHead
-        status.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
+        status.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(240), for: .horizontal)
         status.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.translatesAutoresizingMaskIntoConstraints = false

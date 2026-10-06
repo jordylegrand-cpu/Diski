@@ -19,14 +19,20 @@ extension NSToolbarItem.Identifier {
 }
 
 /// Holds one or two panes side by side.
-final class PaneContainerViewController: NSViewController {
+final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
     let splitView = NSSplitView()
     private(set) var panes: [PaneViewController] = []
+    /// The first pane's share of the width. Kept while the window resizes;
+    /// changed only by dragging the divider.
+    private var firstShare: CGFloat = 0.5
+    private var sharedWidth: CGFloat = 0
+    private var isApplyingShare = false
 
     override func loadView() {
         let root = NSView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        splitView.delegate = self
         splitView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(splitView)
         NSLayoutConstraint.activate([
@@ -44,6 +50,8 @@ final class PaneContainerViewController: NSViewController {
         splitView.addArrangedSubview(pane.view)
         splitView.adjustSubviews()
         equalize()
+        // Again once the new pane has been laid out.
+        DispatchQueue.main.async { [weak self] in self?.applyShare() }
     }
 
     func remove(_ pane: PaneViewController) {
@@ -53,12 +61,35 @@ final class PaneContainerViewController: NSViewController {
     }
 
     func equalize() {
-        guard panes.count > 1 else { return }
+        firstShare = 0.5
+        applyShare()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        // A pane is often added before the window has its final size: keep the
+        // share whenever the width changes instead of splitting once.
         let width = splitView.bounds.width
-        let each = (width - splitView.dividerThickness * CGFloat(panes.count - 1)) / CGFloat(panes.count)
-        for index in 0..<(panes.count - 1) {
-            splitView.setPosition(each * CGFloat(index + 1) + splitView.dividerThickness * CGFloat(index), ofDividerAt: index)
-        }
+        guard abs(width - sharedWidth) > 0.5 else { return }
+        applyShare()
+    }
+
+    private func applyShare() {
+        let width = splitView.bounds.width
+        guard panes.count == 2, width > 0 else { return }
+        sharedWidth = width
+        isApplyingShare = true
+        let usable = width - splitView.dividerThickness
+        splitView.setPosition((usable * firstShare).rounded(), ofDividerAt: 0)
+        isApplyingShare = false
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        // Only a divider dragged by the user carries its index.
+        guard !isApplyingShare, panes.count == 2, notification.userInfo?["NSSplitViewDividerIndex"] != nil else { return }
+        let usable = splitView.bounds.width - splitView.dividerThickness
+        guard usable > 0 else { return }
+        firstShare = min(0.85, max(0.15, panes[0].view.frame.width / usable))
     }
 }
 
