@@ -20,7 +20,7 @@ Everything Finder does — and the things it should have done all along — with
 
 ## Install
 
-1. Download **Diski-v0.1.0-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
+1. Download **Diski-v0.1.1-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
 2. The alpha is not notarized yet, so macOS blocks the first launch. Run this once in Terminal, then open Diski:
    ```sh
    xattr -dr com.apple.quarantine /Applications/Diski.app
