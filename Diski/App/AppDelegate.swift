@@ -319,7 +319,11 @@ enum CIDriver {
             NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
         }
         if let screen = window.screen ?? NSScreen.main {
-            window.setFrame(screen.visibleFrame.insetBy(dx: 10, dy: 8), display: true)
+            // The whole screen below the menu bar: the Dock is hidden on CI but
+            // may still be sliding away when the first window opens.
+            var frame = screen.frame
+            frame.size.height = screen.visibleFrame.maxY - frame.minY
+            window.setFrame(frame.insetBy(dx: 10, dy: 8), display: true)
         }
         if let raw = defaults.string(forKey: "DiskiCIViewMode"), let mode = Int(raw), let viewMode = ViewMode(rawValue: mode) {
             controller.activePane.setViewMode(viewMode)

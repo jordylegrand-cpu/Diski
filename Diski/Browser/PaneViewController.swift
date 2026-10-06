@@ -981,7 +981,11 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     }
 
     @objc private func operationDidFinish(_ notification: Notification) {
-        guard let operation = notification.object as? FileOperation, operation.state == .finished else { return }
+        guard let operation = notification.object as? FileOperation else { return }
+        // Copies, moves and deletions change the free space shown in the bar.
+        freeSpaceCache = nil
+        updateBottomBar()
+        guard operation.state == .finished else { return }
         let here = DirectoryReader.normalized(content.targetDirectory)
         let created = operation.resultURLs.filter {
             DirectoryReader.normalized($0.deletingLastPathComponent().path) == here

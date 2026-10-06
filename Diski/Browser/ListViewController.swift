@@ -682,7 +682,10 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     private func reloadSizeCell(for item: FileItem) {
         let row = outlineView.row(forItem: item)
         let column = outlineView.column(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.size.rawValue))
-        guard row >= 0, column >= 0 else { return }
+        guard row >= 0 else { return }
+        // The status bar totals the selection's sizes.
+        if outlineView.selectedRowIndexes.contains(row) { pane?.updateBottomBar() }
+        guard column >= 0 else { return }
         outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: column))
         if pane?.arrangeOptions.sortKey == .size { pane?.scheduleResort() }
     }
