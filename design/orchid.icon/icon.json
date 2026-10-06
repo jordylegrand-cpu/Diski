@@ -1,0 +1,372 @@
+{
+  "color-space-for-untagged-svg-colors": "display-p3",
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.96078,0.60392,0.83922,1.00000",
+          "srgb:0.55686,0.36078,0.96863,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.22745,0.12157,0.40000,1.00000",
+          "srgb:0.07843,0.03529,0.16078,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "blur": 0.3,
+      "blur-material": 0.3,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "pearl.svg",
+          "name": "Pearl"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "heart-1.svg",
+          "name": "Petal Heart 1"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "heart-2.svg",
+          "name": "Petal Heart 2"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "heart-3.svg",
+          "name": "Petal Heart 3"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "heart-4.svg",
+          "name": "Petal Heart 4"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.49412,0.74510,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "heart-5.svg",
+          "name": "Petal Heart 5"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.89412,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.81569,0.91765,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "petal-1.svg",
+          "name": "Petal 1"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.89412,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.81569,0.91765,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "petal-2.svg",
+          "name": "Petal 2"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.89412,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.81569,0.91765,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "petal-3.svg",
+          "name": "Petal 3"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.89412,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.81569,0.91765,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "petal-4.svg",
+          "name": "Petal 4"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.89412,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.81569,0.91765,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "petal-5.svg",
+          "name": "Petal 5"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Blossom",
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.4
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.45
+      }
+    },
+    {
+      "blur": 0.0,
+      "blur-material": 0.0,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.14118,0.07059,0.26275,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.94510,0.90980,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "eyes.svg",
+          "name": "Eyes"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.14118,0.07059,0.26275,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.94510,0.90980,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "smile.svg",
+          "name": "Smile"
+        }
+      ],
+      "lighting": "combined",
+      "name": "Face",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.45
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "blur": 0.5,
+      "blur-material": 0.5,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:1.00000,1.00000,1.00000,1.00000",
+                  "srgb:0.93725,0.88627,1.00000,0.92000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.71765,0.61176,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "panel.svg",
+          "name": "Face Panel",
+          "opacity-specializations": [
+            {
+              "value": 1.0
+            },
+            {
+              "appearance": "dark",
+              "value": 0.3
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "name": "Panel",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.4
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.4
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
