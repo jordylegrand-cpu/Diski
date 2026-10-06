@@ -310,36 +310,6 @@ enum ShortcutsWindow {
 
 // MARK: - CI screenshot driver
 
-/// CI only: thin views (lines) in the window, which symbols exist, and the
-/// system's sidebar artwork, to match Finder.
-@MainActor
-private func printDiagnostics(_ window: NSWindow) {
-    func walk(_ view: NSView, depth: Int) {
-        let frame = view.convert(view.bounds, to: nil)
-        let name = String(describing: type(of: view))
-        let thin = frame.height <= 3 || frame.width <= 3
-        let named = name.range(of: "Separator|Edge|Pocket|Line|Border|Shadow|Titlebar|Toolbar", options: .regularExpression) != nil
-        if (thin || named) && !view.isHiddenOrHasHiddenAncestor {
-            print("DIAG view \(name) frame=\(frame) depth=\(depth) alpha=\(view.alphaValue)")
-        }
-        for sub in view.subviews { walk(sub, depth: depth + 1) }
-    }
-    if let root = window.contentView?.superview { walk(root, depth: 0) }
-    print("DIAG contentLayoutRect=\(window.contentLayoutRect) frame=\(window.frame)")
-    for name in ["airdrop", "clock", "person.2", "app.store", "appstore", "a.square", "applications",
-                 "apps.iphone", "macwindow", "menubar.dock.rectangle", "dock.rectangle", "icloud", "internaldrive",
-                 "externaldrive", "house", "trash", "network", "globe", "doc", "arrow.down.circle"] {
-        print("DIAG symbol \(name) \(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil)")
-    }
-    let coreTypes = "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources"
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: coreTypes)) ?? []
-    for name in names.sorted() where name.localizedCaseInsensitiveContains("sidebar") || name.localizedCaseInsensitiveContains("toolbar") {
-        print("DIAG coretypes \(name)")
-    }
-    print("DIAG coretypes total \(names.count)")
-    fflush(stdout)
-}
-
 /// Lets the CI workflow put the app into specific states before taking
 /// screenshots, via launch arguments such as `-DiskiCIMode YES -DiskiCIViewMode 1`.
 /// Inert unless `DiskiCIMode` is set.
@@ -406,9 +376,6 @@ enum CIDriver {
             }
             if defaults.bool(forKey: "DiskiCIGetInfo") {
                 pane.getInfo(nil)
-            }
-            if defaults.bool(forKey: "DiskiCIDiagnostics") {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { printDiagnostics(window) }
             }
         }
     }
