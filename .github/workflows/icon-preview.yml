@@ -1,0 +1,59 @@
+name: Icon preview
+
+# Temporary, for designing the app icon: renders the candidates in design/
+# with Icon Composer's ictool (every installed version) and publishes the PNGs
+# to a ref for review.
+on:
+  push:
+    paths:
+      - 'design/**'
+      - '.github/workflows/icon-preview.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: icon-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render with ictool
+        run: |
+          mkdir -p out
+          seen=""
+          for xcode in $(ls -d /Applications/Xcode*.app | sort -rV); do
+            ictool="$xcode/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+            [ -x "$ictool" ] || continue
+            ver=$("$ictool" --version | sed -n 's/.*"short-bundle-version" *: *"\([^"]*\)".*/\1/p')
+            case " $seen " in *" $ver "*) continue ;; esac
+            seen="$seen $ver"
+            echo "== $xcode: Icon Composer $ver"
+            mkdir -p "out/ic-$ver"
+            for icon in design/*.icon; do
+              name=$(basename "$icon" .icon)
+              for r in Default Dark ClearLight ClearDark TintedLight TintedDark; do
+                "$ictool" "$icon" --export-image --output-file "out/ic-$ver/$name-$r.png" \
+                  --platform macOS --rendition $r --width 512 --height 512 --scale 1 >/dev/null 2>&1 \
+                  || echo "FAILED: $name $r with $ver"
+              done
+              "$ictool" "$icon" --export-image --output-file "out/ic-$ver/$name-1024.png" \
+                --platform macOS --rendition Default --width 1024 --height 1024 --scale 1 >/dev/null 2>&1 || true
+            done
+          done
+          echo "$seen" > out/versions.txt
+          ls -R out | head -80
+
+      - name: Publish renders to a temporary ref
+        run: |
+          cd out
+          git init -q .
+          git checkout -q -b icons
+          git add -A
+          git -c user.name=diski-ci -c user.email=ci@diski.invalid commit -q -m "Icon renders for ${GITHUB_SHA}"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" icons:refs/diski-ci/icons

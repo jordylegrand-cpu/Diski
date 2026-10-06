@@ -1,0 +1,157 @@
+{
+  "color-space-for-untagged-svg-colors": "display-p3",
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.54118,0.56471,0.60784,1.00000",
+          "srgb:0.22745,0.24314,0.27451,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.25,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.75,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.18824,0.20000,0.22745,1.00000",
+          "srgb:0.06667,0.07059,0.08235,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.25,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.75,
+            "y": 1
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "blur": 0.0,
+      "blur-material": 0.0,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.07059,0.07843,0.09412,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95294,0.96078,0.97255,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "eyes.svg",
+          "name": "Eyes"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.07059,0.07843,0.09412,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95294,0.96078,0.97255,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "smile.svg",
+          "name": "Smile"
+        }
+      ],
+      "lighting": "combined",
+      "name": "Face",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "blur": 0.5,
+      "blur-material": 0.5,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:1.00000,1.00000,1.00000,1.00000",
+                  "srgb:0.85490,0.87059,0.89412,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.36863,0.39216,0.43922,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "panel.svg",
+          "name": "Face Panel",
+          "opacity-specializations": [
+            {
+              "value": 1.0
+            },
+            {
+              "appearance": "dark",
+              "value": 0.55
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "name": "Panel",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.25
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
