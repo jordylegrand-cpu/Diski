@@ -249,6 +249,10 @@ final class IndentedHeaderCell: NSTableHeaderCell {
 /// separators between columns, titles and chevrons) is AppKit's own drawing.
 final class ListHeaderView: NSTableHeaderView {
     override func draw(_ dirtyRect: NSRect) {
+        // The header the table makes for itself sits on the table's background;
+        // this one is transparent and would show the window's grey through.
+        (tableView?.backgroundColor ?? .controlBackgroundColor).setFill()
+        dirtyRect.fill()
         guard let table = tableView, bounds.height > 3,
               let first = table.tableColumns.firstIndex(where: { !$0.isHidden }),
               let last = table.tableColumns.lastIndex(where: { !$0.isHidden }) else {
@@ -471,9 +475,9 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let insets = contentWidth() - columns.filter { !$0.isHidden }.reduce(0) { $0 + $1.width + spacing }
         func room(for count: Int) -> CGFloat { clip - insets - CGFloat(count + 1) * spacing }
 
-        // Names stay readable (a dozen characters next to the icon) before
-        // any other column is kept.
-        let nameFloor = max(name.minWidth, 120 + listAppearance.density.iconSize)
+        // Names stay readable (about twenty characters after the disclosure
+        // triangle and the icon) before any other column is kept.
+        let nameFloor = max(name.minWidth, 200 + listAppearance.density.iconSize)
         var shown = others
         while let leastImportant = shown.min(by: { importance(of: $0) < importance(of: $1) }),
               nameFloor + shown.reduce(0, { $0 + $1.minWidth }) > room(for: shown.count) {
@@ -486,7 +490,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
         let total = room(for: shown.count)
         let othersWidth = shown.reduce(0) { $0 + $1.width }
-        let nameShare = max(name.minWidth, (total * 0.4).rounded())
+        let nameShare = max(nameFloor, (total * 0.4).rounded())
         if total - othersWidth >= nameShare {
             name.width = total - othersWidth
         } else {

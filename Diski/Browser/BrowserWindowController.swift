@@ -176,6 +176,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         activePane = pane
         pane.isActive = true
         updatePreviewPaneForColumnView()
+        // The split view's autosave also stores the preview pane's collapsed
+        // state, including a collapse that was only for column view. The
+        // setting decides; once now and once after the restore at first layout.
+        applyPreviewPaneSetting()
+        DispatchQueue.main.async { [weak self] in self?.applyPreviewPaneSetting() }
 
         let toolbar = NSToolbar(identifier: "DiskiBrowserToolbar")
         toolbar.delegate = self
@@ -326,6 +331,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard hide != previewPaneHiddenForColumns else { return }
         previewPaneHiddenForColumns = hide
         let collapse = hide || !Prefs.showInspector
+        if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
+    }
+
+    private func applyPreviewPaneSetting() {
+        let collapse = previewPaneHiddenForColumns || !Prefs.showInspector
         if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
     }
 

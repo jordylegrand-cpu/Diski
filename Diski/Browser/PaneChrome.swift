@@ -27,6 +27,12 @@ final class BottomBarView: NSView {
     private static var componentCache: [String: (title: String, image: NSImage)] = [:]
     /// Status texts from most to least detailed; the longest one that fits is shown.
     private var statusVariants: [String] = []
+    /// The volume's name, and the path's width with every name shown. When
+    /// even the volume's name can't stay whole beside the status, the volume
+    /// shows its icon alone instead of a clipped name.
+    private var rootTitle = ""
+    private var rootCollapsed = false
+    private var fullPathWidth: CGFloat = 0
 
     var showsIconSizeSlider = false {
         didSet {
@@ -150,7 +156,15 @@ final class BottomBarView: NSView {
         let normalized = url.map { DirectoryReader.normalized($0.path) }
         guard normalized != shownPath else { return }
         shownPath = normalized
-        guard let path = normalized else { componentPaths = []; pathControl.pathItems = []; fitStatus(); return }
+        guard let path = normalized else {
+            componentPaths = []
+            pathControl.pathItems = []
+            rootTitle = ""
+            rootCollapsed = false
+            fullPathWidth = 0
+            fitStatus()
+            return
+        }
         let root = VolumeMonitor.shared.volume(containing: path)?.path ?? "/"
         var paths: [String] = []
         var current = path
@@ -175,9 +189,37 @@ final class BottomBarView: NSView {
             }
             return item
         }
-        // Items made by hand may not pick up the control's font; keep the native 11 pt.
-        for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
+        applyCellFont()
+        rootTitle = pathControl.pathItems.first?.title ?? ""
+        rootCollapsed = false
+        fullPathWidth = pathControl.intrinsicContentSize.width
         fitStatus()
+    }
+
+    /// Items made by hand may not pick up the control's font; keep the native 11 pt.
+    private func applyCellFont() {
+        for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
+    }
+
+    /// The control collapses the folders between the volume and the last
+    /// item to icons by itself, but clips the volume's name: decide that here.
+    private func fitRoot(statusWidth: CGFloat) {
+        let items = pathControl.pathItems
+        guard items.count > 1 else { return }
+        let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0
+        let room = bounds.width - 7 - 12 - 12 - sliderRoom - statusWidth
+        let font = pathControl.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        func width(_ text: String) -> CGFloat { ceil((text as NSString).size(withAttributes: [.font: font]).width) }
+        // Every item's icon, the chevrons between them, the volume's name and
+        // up to 100 pt of the last name (the control truncates the rest).
+        let lastTitle = items.last?.title ?? ""
+        let needed = CGFloat(items.count) * 20 + CGFloat(items.count - 1) * 14 + width(rootTitle) + min(width(lastTitle), 100)
+        let collapse = needed > room
+        guard collapse != rootCollapsed else { return }
+        rootCollapsed = collapse
+        items[0].title = collapse ? "" : rootTitle
+        pathControl.pathItems = items
+        applyCellFont()
     }
 
     private static func component(for path: String, isRoot: Bool) -> (title: String, image: NSImage) {
@@ -217,13 +259,16 @@ final class BottomBarView: NSView {
     private func fitStatus() {
         guard let shortest = statusVariants.last else {
             if !status.stringValue.isEmpty { status.stringValue = "" }
+            fitRoot(statusWidth: 0)
             return
         }
         let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0   // 90 slider + 10 gap
-        let room = bounds.width - 7 - 12 - 12 - sliderRoom - pathControl.intrinsicContentSize.width
+        let room = bounds.width - 7 - 12 - 12 - sliderRoom - fullPathWidth
         let font = status.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let chosen = statusVariants.first { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) + 4 <= room } ?? shortest
+        func width(_ text: String) -> CGFloat { ceil((text as NSString).size(withAttributes: [.font: font]).width) + 4 }
+        let chosen = statusVariants.first { width($0) <= room } ?? shortest
         if status.stringValue != chosen { status.stringValue = chosen }
+        fitRoot(statusWidth: width(chosen))
     }
 
     @objc private func pathClicked(_ sender: NSPathControl) {

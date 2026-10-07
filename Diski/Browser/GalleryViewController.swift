@@ -244,7 +244,8 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
         strip.reloadData()
         if !selection.isEmpty {
             select(selection, scroll: false)
-        } else if let first = items.first, reset {
+        } else if let first = items.first, reset || previous.isEmpty {
+            // A folder just opened (or its first listing just arrived): show its first file, like Finder.
             select([first], scroll: true)
         } else {
             updatePreview()

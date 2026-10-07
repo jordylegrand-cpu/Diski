@@ -220,7 +220,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         if NSScroller.preferredScrollerStyle == .legacy {
             chrome += NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
         }
-        return min(480, max(152, (widest + chrome).rounded(.up)))
+        // Capped so one long name doesn't push the other columns off screen.
+        return min(340, max(152, (widest + chrome).rounded(.up)))
     }
 
     /// Legacy (always visible) scrollers take room in every column and replace the dividers.
