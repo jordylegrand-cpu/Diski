@@ -26,6 +26,7 @@ enum MainMenu {
         // Diski
         let app = NSMenu(title: "Diski")
         add(app, "About Diski", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
+        add(app, "Check for Updates…", #selector(AppDelegate.checkForUpdates(_:)))
         app.addItem(.separator())
         add(app, "Settings…", #selector(AppDelegate.showSettings(_:)), ",")
         app.addItem(.separator())

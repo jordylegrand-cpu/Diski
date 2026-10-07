@@ -76,6 +76,7 @@ enum Prefs {
 
     static func register() {
         defaults.register(defaults: [
+            "automaticUpdates": true,
             "showHiddenFiles": false,
             "foldersOnTop": true,
             "showFullPathInTitle": true,
@@ -112,6 +113,11 @@ enum Prefs {
         if let current = defaults.object(forKey: key) as? T, current == value { return }
         defaults.set(value, forKey: key)
         if notify { changed(key) }
+    }
+
+    static var automaticUpdates: Bool {
+        get { defaults.bool(forKey: "automaticUpdates") }
+        set { store(newValue, forKey: "automaticUpdates") }
     }
 
     static var showHiddenFiles: Bool {

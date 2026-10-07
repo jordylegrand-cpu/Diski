@@ -16,16 +16,20 @@ Everything Finder does — and the things it should have done all along — with
   <img src="docs/screenshots/list.jpg" alt="Diski list view" width="900">
 </p>
 
-> **Alpha (0.1.2).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
+> **Alpha (0.1.3).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
 
 ## Install
 
-1. Download **Diski-v0.1.2-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
+1. Download **Diski-v0.1.3-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
 2. The alpha is not notarized yet, so macOS blocks the first launch. Run this once in Terminal, then open Diski:
    ```sh
    xattr -dr com.apple.quarantine /Applications/Diski.app
    ```
 3. For the Trash and other protected folders, turn on **Full Disk Access** for Diski in System Settings › Privacy & Security.
+
+Diski keeps itself up to date from GitHub releases (Settings › General, or Diski › Check for Updates…); updates install when Diski relaunches or quits.
+
+Because alphas are ad-hoc signed, macOS may ask for Full Disk Access again after an update.
 
 ## Why it is fast
 

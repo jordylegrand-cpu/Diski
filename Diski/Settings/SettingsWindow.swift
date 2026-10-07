@@ -5,6 +5,9 @@ import SwiftUI
 /// it differs (Prefs posts on every write), and changes made elsewhere
 /// (⇧⌘., View Options) are read back while the window is open.
 final class SettingsModel: ObservableObject {
+    @Published var automaticUpdates = Prefs.automaticUpdates {
+        didSet { if Prefs.automaticUpdates != automaticUpdates { Prefs.automaticUpdates = automaticUpdates } }
+    }
     @Published var showHidden = Prefs.showHiddenFiles {
         didSet { if Prefs.showHiddenFiles != showHidden { Prefs.showHiddenFiles = showHidden } }
     }
@@ -78,6 +81,7 @@ final class SettingsModel: ObservableObject {
     /// Reads back what changed elsewhere. Only differing values are assigned,
     /// so the didSet write-throughs above never loop.
     private func refresh() {
+        if automaticUpdates != Prefs.automaticUpdates { automaticUpdates = Prefs.automaticUpdates }
         if showHidden != Prefs.showHiddenFiles { showHidden = Prefs.showHiddenFiles }
         if foldersOnTop != Prefs.foldersOnTop { foldersOnTop = Prefs.foldersOnTop }
         if fullPathTitle != Prefs.showFullPathInTitle { fullPathTitle = Prefs.showFullPathInTitle }
@@ -178,6 +182,18 @@ struct SettingsView: View {
                 Text("iTerm").tag("com.googlecode.iterm2")
                 Text("Ghostty").tag("com.mitchellh.ghostty")
                 Text("Warp").tag("dev.warp.Warp-Stable")
+            }
+            Section {
+                Toggle(isOn: $model.automaticUpdates) {
+                    Text("Keep Diski up to date")
+                    Text("Checks GitHub for new releases and installs them when Diski relaunches or quits.")
+                }
+                LabeledContent("Version") {
+                    HStack {
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0")
+                        Button("Check Now") { Updater.shared.checkNow(userInitiated: true) }
+                    }
+                }
             }
         }
         .formStyle(.grouped)

@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
         guard !isRunningTests else { return }
+        if !CIDriver.isEnabled { Updater.shared.start() }
         FileOperationManager.shared.conflictPresenter = { source, existing, operation, completion in
             ConflictDialog.present(source: source, existing: existing, operation: operation, completion: completion)
         }
@@ -51,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if !CIDriver.isEnabled { saveSession() }
+        if !CIDriver.isEnabled { Updater.shared.installStagedUpdateOnTermination() }
     }
 
     // MARK: Session restore (windows, tabs, folders, view modes)
@@ -194,6 +196,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: Menu actions
+
+    @MainActor @objc func checkForUpdates(_ sender: Any?) {
+        Updater.shared.checkNow(userInitiated: true)
+    }
 
     @objc func showSettings(_ sender: Any?) {
         SettingsWindowController.shared.showWindow(nil)
