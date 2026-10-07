@@ -4,8 +4,8 @@
     {
       "value": {
         "linear-gradient": [
-          "srgb:0.27059,0.83922,0.66667,1.00000",
-          "srgb:0.07451,0.64706,0.52549,1.00000"
+          "srgb:0.20000,0.16078,0.61961,1.00000",
+          "srgb:0.10196,0.07843,0.35294,1.00000"
         ],
         "orientation": {
           "start": {
@@ -23,8 +23,8 @@
       "appearance": "dark",
       "value": {
         "linear-gradient": [
-          "srgb:0.05098,0.23922,0.21176,1.00000",
-          "srgb:0.00784,0.05098,0.04706,1.00000"
+          "srgb:0.12157,0.09020,0.38431,1.00000",
+          "srgb:0.06275,0.05882,0.23529,1.00000"
         ],
         "orientation": {
           "start": {
@@ -41,20 +41,19 @@
   ],
   "groups": [
     {
-      "blur": 0.0,
       "blur-material": 0.0,
       "layers": [
         {
           "fill-specializations": [
             {
               "value": {
-                "solid": "srgb:0.95686,1.00000,0.98431,1.00000"
+                "solid": "srgb:0.96471,0.97647,1.00000,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "solid": "srgb:0.90196,1.00000,0.96078,1.00000"
+                "solid": "srgb:0.91765,0.94118,1.00000,1.00000"
               }
             },
             {
@@ -73,7 +72,7 @@
       "name": "Eyes",
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.45
+        "opacity": 0.65
       },
       "specular": true,
       "translucency": {
@@ -82,130 +81,132 @@
       }
     },
     {
-      "blur": 0.1,
-      "blur-material": 0.1,
+      "blur-material": 0.0,
       "layers": [
         {
           "fill-specializations": [
             {
               "value": {
-                "linear-gradient": [
-                  "srgb:0.05490,0.40000,0.33725,1.00000",
-                  "srgb:0.01176,0.16471,0.13725,1.00000"
-                ],
-                "orientation": {
-                  "start": {
-                    "x": 0.5,
-                    "y": 0.0
-                  },
-                  "stop": {
-                    "x": 0.5,
-                    "y": 1.0
-                  }
-                }
+                "solid": "srgb:0.61961,0.88627,1.00000,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "linear-gradient": [
-                  "srgb:0.18431,0.58431,0.52549,1.00000",
-                  "srgb:0.13333,0.47059,0.41961,1.00000"
-                ],
-                "orientation": {
-                  "start": {
-                    "x": 0.5,
-                    "y": 0.0
-                  },
-                  "stop": {
-                    "x": 0.5,
-                    "y": 1.0
-                  }
-                }
+                "solid": "srgb:0.49804,0.82745,1.00000,1.00000"
               }
             },
             {
               "appearance": "tinted",
               "value": {
-                "solid": "srgb:1.00000,1.00000,1.00000,0.38000"
+                "solid": "srgb:1.00000,1.00000,1.00000,0.85000"
               }
             }
           ],
           "glass": true,
-          "image-name": "slab.svg",
-          "name": "Slab Face",
-          "opacity-specializations": [
-            {
-              "value": 0.84
-            },
-            {
-              "appearance": "dark",
-              "value": 0.84
-            }
-          ]
-        },
-        {
-          "fill-specializations": [
-            {
-              "value": {
-                "linear-gradient": [
-                  "srgb:0.02353,0.28627,0.24314,1.00000",
-                  "srgb:0.00784,0.16863,0.14118,1.00000"
-                ],
-                "orientation": {
-                  "start": {
-                    "x": 0.5,
-                    "y": 0.0
-                  },
-                  "stop": {
-                    "x": 0.5,
-                    "y": 1.0
-                  }
-                }
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "linear-gradient": [
-                  "srgb:0.10588,0.45882,0.39608,1.00000",
-                  "srgb:0.05882,0.32157,0.28235,1.00000"
-                ],
-                "orientation": {
-                  "start": {
-                    "x": 0.5,
-                    "y": 0.0
-                  },
-                  "stop": {
-                    "x": 0.5,
-                    "y": 1.0
-                  }
-                }
-              }
-            },
-            {
-              "appearance": "tinted",
-              "value": {
-                "solid": "srgb:1.00000,1.00000,1.00000,0.28000"
-              }
-            }
-          ],
-          "glass": false,
-          "image-name": "edge.svg",
-          "name": "Slab Edge",
+          "image-name": "glass-edge.svg",
+          "name": "Glass Edge",
           "opacity-specializations": [
             {
               "value": 1.0
             },
             {
               "appearance": "dark",
-              "value": 0.9
+              "value": 1.0
             }
           ]
         }
       ],
       "lighting": "individual",
-      "name": "Glass Slab",
+      "name": "Edge",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.0
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.0
+      }
+    },
+    {
+      "blur-material": 0.05,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.58039,0.72941,1.00000,1.00000",
+                  "srgb:0.46275,0.62745,1.00000,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0.0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1.0
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.48627,0.61961,0.98039,1.00000",
+                  "srgb:0.40000,0.57255,1.00000,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0.0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1.0
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "linear-gradient": [
+                  "srgb:1.00000,1.00000,1.00000,0.95000",
+                  "srgb:1.00000,1.00000,1.00000,0.55000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0.0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1.0
+                  }
+                }
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "glass-face.svg",
+          "name": "Glass Face",
+          "opacity-specializations": [
+            {
+              "value": 0.7
+            },
+            {
+              "appearance": "dark",
+              "value": 0.66
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "name": "Slab",
       "shadow": {
         "kind": "neutral",
         "opacity": 0.3
@@ -213,24 +214,23 @@
       "specular": true,
       "translucency": {
         "enabled": true,
-        "value": 0.3
+        "value": 0.35
       }
     },
     {
-      "blur": 0.0,
       "blur-material": 0.0,
       "layers": [
         {
           "fill-specializations": [
             {
               "value": {
-                "solid": "srgb:0.95686,1.00000,0.98431,1.00000"
+                "solid": "srgb:0.96471,0.97647,1.00000,1.00000"
               }
             },
             {
               "appearance": "dark",
               "value": {
-                "solid": "srgb:0.90196,1.00000,0.96078,1.00000"
+                "solid": "srgb:0.91765,0.94118,1.00000,1.00000"
               }
             },
             {
@@ -249,7 +249,7 @@
       "name": "Smile",
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.45
+        "opacity": 0.5
       },
       "specular": true,
       "translucency": {
