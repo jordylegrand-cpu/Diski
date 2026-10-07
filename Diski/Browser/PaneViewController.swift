@@ -496,7 +496,8 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         viewMode = mode
         installContent(for: mode)
         content.display(items: items, directory: currentPath, changes: nil, reset: true)
-        content.select(selection, scroll: true)
+        // An empty selection would undo the gallery's own choice of the first file.
+        if !selection.isEmpty { content.select(selection, scroll: true) }
         content.focus()
         // A quick crossfade makes the switch feel smooth without slowing it down.
         let incoming = content.view

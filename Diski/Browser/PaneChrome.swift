@@ -201,20 +201,16 @@ final class BottomBarView: NSView {
         for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
     }
 
-    /// The control collapses the folders between the volume and the last
-    /// item to icons by itself, but clips the volume's name: decide that here.
+    /// The control collapses folders to icons by itself, but clips the
+    /// volume's name ("Macinto"): decide that one here.
     private func fitRoot(statusWidth: CGFloat) {
         let items = pathControl.pathItems
         guard items.count > 1 else { return }
         let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0
         let room = bounds.width - 7 - 12 - 12 - sliderRoom - statusWidth
-        let font = pathControl.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
-        func width(_ text: String) -> CGFloat { ceil((text as NSString).size(withAttributes: [.font: font]).width) }
-        // Every item's icon, the chevrons between them, the volume's name and
-        // up to 100 pt of the last name (the control truncates the rest).
-        let lastTitle = items.last?.title ?? ""
-        let needed = CGFloat(items.count) * 20 + CGFloat(items.count - 1) * 14 + width(rootTitle) + min(width(lastTitle), 100)
-        let collapse = needed > room
+        // Once the whole path doesn't fit, the control starts shortening it
+        // from the volume end: the volume goes to its icon first.
+        let collapse = fullPathWidth > room
         guard collapse != rootCollapsed else { return }
         rootCollapsed = collapse
         items[0].title = collapse ? "" : rootTitle
