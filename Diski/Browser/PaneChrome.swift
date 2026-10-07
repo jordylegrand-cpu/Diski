@@ -27,12 +27,6 @@ final class BottomBarView: NSView {
     private static var componentCache: [String: (title: String, image: NSImage)] = [:]
     /// Status texts from most to least detailed; the longest one that fits is shown.
     private var statusVariants: [String] = []
-    /// The volume's name, and the path's width with every name shown. When
-    /// even the volume's name can't stay whole beside the status, the volume
-    /// shows its icon alone instead of a clipped name.
-    private var rootTitle = ""
-    private var rootCollapsed = false
-    private var fullPathWidth: CGFloat = 0
 
     var showsIconSizeSlider = false {
         didSet {
@@ -158,10 +152,9 @@ final class BottomBarView: NSView {
         shownPath = normalized
         guard let path = normalized else {
             componentPaths = []
+            components = []
+            shownTitles = []
             pathControl.pathItems = []
-            rootTitle = ""
-            rootCollapsed = false
-            fullPathWidth = 0
             fitStatus()
             return
         }
@@ -176,46 +169,54 @@ final class BottomBarView: NSView {
         paths.reverse()
         componentPaths = paths
         let lastIndex = paths.count - 1
-        pathControl.pathItems = paths.enumerated().map { index, p in
-            let item = NSPathControlItem()
+        components = paths.enumerated().map { index, p in
             if index == lastIndex, index > 0, let lastIcon {
                 // The selection: no NSWorkspace lookup and no cache entry per arrow key.
-                item.title = FileManager.default.displayName(atPath: p)
-                item.image = Self.sized(lastIcon)
-            } else {
-                let c = Self.component(for: p, isRoot: index == 0)
-                item.title = c.title
-                item.image = c.image
+                return (title: FileManager.default.displayName(atPath: p), image: Self.sized(lastIcon))
             }
-            return item
+            return Self.component(for: p, isRoot: index == 0)
         }
-        applyCellFont()
-        rootTitle = pathControl.pathItems.first?.title ?? ""
-        rootCollapsed = false
-        fullPathWidth = pathControl.intrinsicContentSize.width
+        shownTitles = []
         fitStatus()
     }
 
-    /// Items made by hand may not pick up the control's font; keep the native 11 pt.
-    private func applyCellFont() {
-        for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
+    /// The path's components, and which of them show their name. The bar
+    /// decides this itself, from the volume end, instead of letting the
+    /// control clip names ("Macinto", "runr").
+    private var components: [(title: String, image: NSImage)] = []
+    private var shownTitles: [Bool] = []
+
+    private var pathFont: NSFont { pathControl.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize) }
+
+    private func pathWidth(_ titles: [Bool]) -> CGFloat {
+        var width: CGFloat = 0
+        for (i, c) in components.enumerated() {
+            width += 16   // icon
+            if titles[i] { width += 4 + ceil((c.title as NSString).size(withAttributes: [.font: pathFont]).width) }
+            if i < components.count - 1 { width += 15 }   // chevron and spacing
+        }
+        return width
     }
 
-    /// The control collapses folders to icons by itself, but clips the
-    /// volume's name ("Macinto"): decide that one here.
-    private func fitRoot(statusWidth: CGFloat) {
-        let items = pathControl.pathItems
-        guard items.count > 1 else { return }
-        let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0
-        let room = bounds.width - 7 - 12 - 12 - sliderRoom - statusWidth
-        // Once the whole path doesn't fit, the control starts shortening it
-        // from the volume end: the volume goes to its icon first.
-        let collapse = fullPathWidth > room
-        guard collapse != rootCollapsed else { return }
-        rootCollapsed = collapse
-        items[0].title = collapse ? "" : rootTitle
-        pathControl.pathItems = items
-        applyCellFont()
+    /// Hides names from the volume towards the end until the path fits in
+    /// `room`; the last item always keeps its name (the control truncates it).
+    private func fitPath(room: CGFloat) {
+        var titles = [Bool](repeating: true, count: components.count)
+        var i = 0
+        while i < components.count - 1, pathWidth(titles) > room {
+            titles[i] = false
+            i += 1
+        }
+        guard titles != shownTitles else { return }
+        shownTitles = titles
+        pathControl.pathItems = components.enumerated().map { index, c in
+            let item = NSPathControlItem()
+            item.title = titles[index] ? c.title : ""
+            item.image = c.image
+            return item
+        }
+        // Items made by hand may not pick up the control's font; keep the native 11 pt.
+        for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
     }
 
     private static func component(for path: String, isRoot: Bool) -> (title: String, image: NSImage) {
@@ -246,25 +247,30 @@ final class BottomBarView: NSView {
         if slider.doubleValue != Double(size) { slider.doubleValue = Double(size) }
     }
 
+    private var fitScheduled = false
+
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
-        if widthChanged { fitStatus() }
+        // After this layout pass: the fit can replace the path's items.
+        guard widthChanged, !fitScheduled else { return }
+        fitScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.fitScheduled = false
+            self.fitStatus()
+        }
     }
 
     private func fitStatus() {
-        guard let shortest = statusVariants.last else {
-            if !status.stringValue.isEmpty { status.stringValue = "" }
-            fitRoot(statusWidth: 0)
-            return
-        }
         let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0   // 90 slider + 10 gap
-        let room = bounds.width - 7 - 12 - 12 - sliderRoom - fullPathWidth
+        let available = bounds.width - 7 - 12 - 12 - sliderRoom
+        let full = components.isEmpty ? 0 : pathWidth([Bool](repeating: true, count: components.count))
         let font = status.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
         func width(_ text: String) -> CGFloat { ceil((text as NSString).size(withAttributes: [.font: font]).width) + 4 }
-        let chosen = statusVariants.first { width($0) <= room } ?? shortest
+        let chosen = statusVariants.first { width($0) <= available - full } ?? statusVariants.last ?? ""
         if status.stringValue != chosen { status.stringValue = chosen }
-        fitRoot(statusWidth: width(chosen))
+        fitPath(room: available - (chosen.isEmpty ? 0 : width(chosen)))
     }
 
     @objc private func pathClicked(_ sender: NSPathControl) {

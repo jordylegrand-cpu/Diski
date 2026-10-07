@@ -87,7 +87,7 @@ jobs:
           test -d "$APP" || exit 0
           defaults write com.apple.dock autohide -bool true && killall Dock || true
           bash .github/scripts/demo-content.sh "$HOME/Showcase" > shots/demo-content.txt 2>&1 || true
-          bash .github/scripts/screenshots.sh "$APP" "$PWD/shots" "$HOME/Showcase"
+          SAMPLE_SHOTS=1 bash .github/scripts/screenshots.sh "$APP" "$PWD/shots" "$HOME/Showcase"
           # Finder itself, same window frame, for side-by-side comparison.
           bash .github/scripts/finder-shots.sh "$PWD/shots" "$HOME/Showcase" || true
 
