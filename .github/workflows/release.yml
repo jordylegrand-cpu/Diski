@@ -40,7 +40,7 @@ jobs:
           VERSION="${{ inputs.version }}"
           SUM=$(cut -d' ' -f1 checksum.txt)
           cat > notes.md <<NOTES
-          <p align="center"><img src="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/docs/icon.png" width="128" alt="Diski"></p>
+          <p align="center"><img src="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/docs/icon-midnight.png" width="128" alt="Diski"></p>
 
           **Diski ${VERSION}** — an alpha of the fast, native Finder alternative for macOS 26 and later.
 

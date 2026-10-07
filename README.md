@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/icon.png" width="160" alt="Diski icon">
+  <img src="docs/icon-midnight.png" width="160" alt="Diski icon">
 </p>
 
 <h1 align="center">Diski</h1>
@@ -125,7 +125,7 @@ Help › Diski Keyboard Shortcuts (⇧⌘/) shows the full list.
 
 `Diski/AppIcon.icon` is an Icon Composer document: "Midnight Glass", the Finder face on a deep indigo tile, its profile half a thick slab of periwinkle Liquid Glass with the smile seen through it. Dark, tinted and clear variants are included. Open it in Icon Composer to tweak it.
 
-<p align="center"><img src="docs/icon-variants.png" width="720" alt="Icon variants"></p>
+<p align="center"><img src="docs/icon-midnight-variants.png" width="720" alt="Icon variants"></p>
 
 ## Build
 
