@@ -5,9 +5,8 @@ import AppKit
 /// slider in icon view.
 final class BottomBarView: NSView {
     let pathControl = NSPathControl()
-    let status = NSTextField(labelWithString: "")
+    private let status = NSTextField(labelWithString: "")
     private let slider = NSSlider(value: 64, minValue: 32, maxValue: 256, target: nil, action: nil)
-    private let separator = NSBox()
     var onNavigate: ((URL) -> Void)?
     var onIconSizeChange: ((CGFloat) -> Void)?
     /// Drops on the path's folders, like Finder: the operation a drag onto a
@@ -21,19 +20,25 @@ final class BottomBarView: NSView {
     private var statusToSlider: NSLayoutConstraint!
     private var statusToEdge: NSLayoutConstraint!
 
+    /// The (normalized) path shown, and the path of each component by index:
+    /// NSPathControlItem.url is read-only, so clicks and drops map by index.
+    private var shownPath: String?
+    private var componentPaths: [String] = []
+    private static var componentCache: [String: (title: String, image: NSImage)] = [:]
+    /// Status texts from most to least detailed; the longest one that fits is shown.
+    private var statusVariants: [String] = []
+
     var showsIconSizeSlider = false {
         didSet {
             slider.isHidden = !showsIconSizeSlider
             statusToSlider.isActive = showsIconSizeSlider
             statusToEdge.isActive = !showsIconSizeSlider
+            fitStatus()
         }
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-
         pathControl.translatesAutoresizingMaskIntoConstraints = false
         pathControl.pathStyle = .standard
         pathControl.controlSize = .small
@@ -56,7 +61,7 @@ final class BottomBarView: NSView {
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         status.textColor = .secondaryLabelColor
         status.alignment = .right
-        status.lineBreakMode = .byTruncatingHead
+        status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(240), for: .horizontal)
         status.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -67,21 +72,20 @@ final class BottomBarView: NSView {
         slider.isHidden = true
         slider.doubleValue = Double(Prefs.iconSize)
 
-        addSubview(separator)
+        // No separator line and no background: the bar sits on the content
+        // like Finder's, 28 pt tall with its text on the bar's centre.
         addSubview(pathControl)
         addSubview(status)
         addSubview(slider)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            separator.topAnchor.constraint(equalTo: topAnchor),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pathControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            pathControl.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            heightAnchor.constraint(equalToConstant: 28),
+            // The control draws its first icon 5 pt in: the art lands where Finder's does.
+            pathControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            pathControl.centerYAnchor.constraint(equalTo: centerYAnchor),
             status.leadingAnchor.constraint(greaterThanOrEqualTo: pathControl.trailingAnchor, constant: 12),
-            status.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            status.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            slider.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            slider.centerYAnchor.constraint(equalTo: centerYAnchor),
             slider.widthAnchor.constraint(equalToConstant: 90),
         ])
         statusToSlider = status.trailingAnchor.constraint(equalTo: slider.leadingAnchor, constant: -10)
@@ -101,12 +105,14 @@ final class BottomBarView: NSView {
         let point = pathControl.convert(info.draggingLocation, from: nil)
         guard pathControl.bounds.contains(point),
               let component = cell.pathComponentCell(at: point, withFrame: pathControl.bounds, in: pathControl),
-              let url = component.url else { return nil }
+              let i = cell.pathComponentCells.firstIndex(where: { $0 === component }), i < componentPaths.count
+        else { return nil }
+        let path = componentPaths[i]
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
-              !NSWorkspace.shared.isFilePackage(atPath: url.path) else { return nil }
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue,
+              !NSWorkspace.shared.isFilePackage(atPath: path) else { return nil }
         let frame = cell.rect(of: component, withFrame: pathControl.bounds, in: pathControl)
-        return (DirectoryReader.normalized(url.path), convert(frame, from: pathControl))
+        return (DirectoryReader.normalized(path), convert(frame, from: pathControl))
     }
 
     private func validateDrop(_ info: NSDraggingInfo) -> NSDragOperation {
@@ -136,12 +142,94 @@ final class BottomBarView: NSView {
         NSBezierPath(roundedRect: dropHighlight.insetBy(dx: -4, dy: -1), xRadius: 5, yRadius: 5).fill()
     }
 
-    func setPath(_ url: URL) {
-        if pathControl.url != url { pathControl.url = url }
+    /// Shows `url` from its volume down, like Finder ("Macintosh HD › Users › …";
+    /// the control's own `url` setter starts at the home folder). `lastIcon`
+    /// is the selected item's icon, so a selection change needs no icon lookup.
+    func setPath(_ url: URL?, icon lastIcon: NSImage? = nil) {
+        let normalized = url.map { DirectoryReader.normalized($0.path) }
+        guard normalized != shownPath else { return }
+        shownPath = normalized
+        guard let path = normalized else { componentPaths = []; pathControl.pathItems = []; fitStatus(); return }
+        let root = VolumeMonitor.shared.volume(containing: path)?.path ?? "/"
+        var paths: [String] = []
+        var current = path
+        while true {
+            paths.append(current)
+            if current == root || current == "/" || current.isEmpty { break }
+            current = (current as NSString).deletingLastPathComponent
+        }
+        paths.reverse()
+        componentPaths = paths
+        let lastIndex = paths.count - 1
+        pathControl.pathItems = paths.enumerated().map { index, p in
+            let item = NSPathControlItem()
+            if index == lastIndex, index > 0, let lastIcon {
+                // The selection: no NSWorkspace lookup and no cache entry per arrow key.
+                item.title = FileManager.default.displayName(atPath: p)
+                item.image = Self.sized(lastIcon)
+            } else {
+                let c = Self.component(for: p, isRoot: index == 0)
+                item.title = c.title
+                item.image = c.image
+            }
+            return item
+        }
+        // Items made by hand may not pick up the control's font; keep the native 11 pt.
+        for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
+        fitStatus()
+    }
+
+    private static func component(for path: String, isRoot: Bool) -> (title: String, image: NSImage) {
+        if let hit = componentCache[path] { return hit }
+        if componentCache.count > 256 { componentCache.removeAll() }
+        let title = isRoot ? (VolumeMonitor.shared.volume(containing: path)?.name ?? FileManager.default.displayName(atPath: path))
+                           : FileManager.default.displayName(atPath: path)
+        let entry = (title: title, image: sized(NSWorkspace.shared.icon(forFile: path)))
+        componentCache[path] = entry
+        return entry
+    }
+
+    private static func sized(_ image: NSImage) -> NSImage {
+        let copy = (image.copy() as? NSImage) ?? image   // never resize a shared image
+        copy.size = NSSize(width: 16, height: 16)
+        return copy
+    }
+
+    /// `variants` run from most to least detailed ("12 items, 4 GB available",
+    /// "12 items"): the bar shows the longest that leaves the path its full width.
+    func setStatus(_ variants: [String]) {
+        guard variants != statusVariants else { return }
+        statusVariants = variants
+        fitStatus()
+    }
+
+    func syncIconSize(_ size: CGFloat) {
+        if slider.doubleValue != Double(size) { slider.doubleValue = Double(size) }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { fitStatus() }
+    }
+
+    private func fitStatus() {
+        guard let shortest = statusVariants.last else {
+            if !status.stringValue.isEmpty { status.stringValue = "" }
+            return
+        }
+        let sliderRoom: CGFloat = showsIconSizeSlider ? 100 : 0   // 90 slider + 10 gap
+        let room = bounds.width - 7 - 12 - 12 - sliderRoom - pathControl.intrinsicContentSize.width
+        let font = status.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let chosen = statusVariants.first { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) + 4 <= room } ?? shortest
+        if status.stringValue != chosen { status.stringValue = chosen }
     }
 
     @objc private func pathClicked(_ sender: NSPathControl) {
-        guard let url = sender.clickedPathItem?.url else { return }
+        guard let cell = sender.cell as? NSPathCell, let clicked = cell.clickedPathComponentCell,
+              let i = cell.pathComponentCells.firstIndex(where: { $0 === clicked }), i < componentPaths.count
+        else { return }
+        let url = URL(fileURLWithPath: componentPaths[i])
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
             onNavigate?(url)
@@ -172,6 +260,11 @@ final class PaneMessageView: NSView {
     private let button = NSButton(title: "Open Privacy Settings", target: nil, action: nil)
     private let spinner = NSProgressIndicator()
     private(set) var kind: Kind = .none
+    /// The detail's wrap width: narrower panes (dual pane) wrap it sooner
+    /// instead of measuring at 320 pt and clipping the last line.
+    var maxTextWidth: CGFloat = 320 {
+        didSet { if detail.preferredMaxLayoutWidth != maxTextWidth { detail.preferredMaxLayoutWidth = maxTextWidth } }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -185,10 +278,11 @@ final class PaneMessageView: NSView {
         title.textColor = .secondaryLabelColor
         title.alignment = .center
         detail.font = .systemFont(ofSize: 12)
-        detail.textColor = .tertiaryLabelColor
+        // Instructions to read, not disabled text: secondary, like any explanatory label.
+        detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         detail.preferredMaxLayoutWidth = 320
-        button.bezelStyle = .glass
+        button.bezelStyle = .push
         button.target = self
         button.action = #selector(openPrivacySettings)
         spinner.style = .spinning
@@ -273,9 +367,9 @@ enum SearchScope: Int {
     case thisFolder = 0, subfolders = 1, thisMac = 2
 }
 
-/// Floating glass scope switch shown while searching.
+/// The scope switch shown above the results while searching: the native
+/// segmented control on its own, without a capsule around its track.
 final class SearchScopeBar: NSView {
-    private let glass = NSGlassEffectView()
     private let control = NSSegmentedControl(labels: ["This Folder", "Subfolders", "This Mac"],
                                              trackingMode: .selectOne, target: nil, action: nil)
     var onScopeChange: ((SearchScope) -> Void)?
@@ -291,28 +385,18 @@ final class SearchScopeBar: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        glass.translatesAutoresizingMaskIntoConstraints = false
-        glass.cornerRadius = 16
         control.translatesAutoresizingMaskIntoConstraints = false
         control.segmentStyle = .automatic
         control.controlSize = .small
         control.selectedSegment = 0
         control.target = self
         control.action = #selector(changed(_:))
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(control)
-        glass.contentView = container
-        addSubview(glass)
+        addSubview(control)
         NSLayoutConstraint.activate([
-            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
-            glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glass.topAnchor.constraint(equalTo: topAnchor),
-            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
-            control.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            control.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            control.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
-            control.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
+            control.leadingAnchor.constraint(equalTo: leadingAnchor),
+            control.trailingAnchor.constraint(equalTo: trailingAnchor),
+            control.topAnchor.constraint(equalTo: topAnchor),
+            control.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 

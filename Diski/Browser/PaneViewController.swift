@@ -19,7 +19,7 @@ extension NSPasteboard.PasteboardType {
 
 /// One navigable browser pane: history, current folder, view mode, search,
 /// and every file action. A window shows one pane, or two side by side.
-final class PaneViewController: NSViewController, NSMenuItemValidation {
+final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDelegate {
     weak var delegate: PaneViewControllerDelegate?
 
     private(set) var currentPath = ""
@@ -38,9 +38,30 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     private var pendingRename: String?
     private var resortScheduled = false
     private var loadingToken = 0
-    private var freeSpaceCache: (path: String, bytes: Int64?, at: Date)?
-    /// Narrow panes (dual pane) leave out the free space to make room for the path.
-    private var isNarrow = false
+    /// Content below the toolbar, or below the search scope bar while it shows.
+    private var contentTopToSafeArea: NSLayoutConstraint!
+    private var contentTopToScopeBar: NSLayoutConstraint!
+    /// Content above the path bar, or down to the bottom edge while it is hidden.
+    private var contentToBar: NSLayoutConstraint!
+    private var contentToBottom: NSLayoutConstraint!
+
+    /// The preferences the view modes are configured with. Prefs.didChange
+    /// fires for every preference; only these reload the view.
+    private struct ViewSettings: Equatable {
+        var rowDensity = Prefs.rowDensity
+        var iconSize = Prefs.iconSize
+        var thumbnailsInList = Prefs.showThumbnailsInList
+        var listColumns = Prefs.listColumns
+        var folderSizes = Prefs.calculateFolderSizes
+    }
+    private var viewSettings = ViewSettings()
+    /// The settings a pane shows; the others (favorites, the terminal, copying…) need nothing here.
+    private static let paneSettingKeys: Set<String> = ["showHiddenFiles", "foldersOnTop", "rowDensity", "iconSize",
+        "showThumbnailsInList", "listColumns", "calculateFolderSizes", "showPathBar", "showStatusInfo"]
+
+    /// The items the Open With submenu is for; it is filled when it opens.
+    private var openWithTargets: [FileItem] = []
+    private static let openWithMenuID = NSUserInterfaceItemIdentifier("openWith")
 
     // Search
     private(set) var searchText = ""
@@ -98,16 +119,29 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         root.addSubview(bottomBar)
         root.addSubview(scopeBar)
         scopeBar.isHidden = true
+        // While searching, the content moves below the scope bar (8 pt above
+        // and below it), so no rows scroll around the control.
         scopeBar.onVisibilityChange = { [weak self] visible in
-            self?.contentContainer.additionalSafeAreaInsets = NSEdgeInsets(top: visible ? 40 : 0, left: 0, bottom: 0, right: 0)
+            guard let self else { return }
+            self.contentTopToSafeArea.isActive = false
+            self.contentTopToScopeBar.isActive = false
+            if visible {
+                self.contentTopToScopeBar.isActive = true
+            } else {
+                self.contentTopToSafeArea.isActive = true
+            }
         }
+        // Below the toolbar, like Finder's list: nothing scrolls under it,
+        // so macOS draws no scroll edge line there.
+        contentTopToSafeArea = contentContainer.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
+        contentTopToScopeBar = contentContainer.topAnchor.constraint(equalTo: scopeBar.bottomAnchor, constant: 8)
+        contentToBar = contentContainer.bottomAnchor.constraint(equalTo: bottomBar.topAnchor)
+        contentToBottom = contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         NSLayoutConstraint.activate([
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            // Below the toolbar, like Finder's list: nothing scrolls under it,
-            // so macOS draws no scroll edge line there.
-            contentContainer.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
-            contentContainer.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
+            contentTopToSafeArea,
+            contentToBar,
             bottomBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -122,10 +156,8 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         bottomBar.onNavigate = { [weak self] url in self?.navigate(to: url.path) }
         bottomBar.dropOperation = { [weak self] info, path in self?.dragOperation(for: info, destination: path) ?? [] }
         bottomBar.performDrop = { [weak self] info, path in self?.performDrop(info, destination: path) ?? false }
-        bottomBar.onIconSizeChange = { [weak self] size in
-            Prefs.iconSize = size
-            self?.content.appearanceSettingsDidChange()
-        }
+        // Prefs.didChange then reloads the view, once.
+        bottomBar.onIconSizeChange = { size in Prefs.iconSize = size }
         scopeBar.onScopeChange = { [weak self] scope in self?.setSearchScope(scope) }
 
         installContent(for: viewMode)
@@ -133,6 +165,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         center.addObserver(self, selector: #selector(directoryDidUpdate(_:)), name: DirectoryStore.didUpdate, object: nil)
         center.addObserver(self, selector: #selector(prefsDidChange(_:)), name: Prefs.didChange, object: nil)
         center.addObserver(self, selector: #selector(operationDidFinish(_:)), name: FileOperationManager.didFinish, object: nil)
+        center.addObserver(self, selector: #selector(freeSpaceChanged(_:)), name: VolumeMonitor.capacityDidChange, object: nil)
         center.addObserver(self, selector: #selector(pasteboardMayHaveChanged), name: NSApplication.didBecomeActiveNotification, object: nil)
         navigate(to: initialPath, recordHistory: false)
     }
@@ -217,7 +250,6 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         arrangeOptions.filter = ""
         let listing = DirectoryStore.shared.listing(for: path)
         self.listing = listing
-        freeSpaceCache = nil
         loadingToken += 1
         if listing.isLoaded {
             showListing(reset: true)
@@ -276,7 +308,6 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         let listing = DirectoryStore.shared.listing(for: path)
         self.listing = listing
         items = arrange(listing.items)
-        freeSpaceCache = nil
         updateMessage()
         updateBottomBar()
         delegate?.paneDidChangeLocation(self)
@@ -374,9 +405,12 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         if let error = listing.error {
             message.show(error.isPermissionDenied ? .permissionDenied : .error(error.localizedDescription))
         } else if !listing.isLoaded {
-            message.show(.loading)
+            // Column view, like Finder, just shows the (empty) column: a message
+            // there would sit centred over all the other columns.
+            message.show(viewMode == .columns ? .none : .loading)
         } else if items.isEmpty {
-            message.show(arrangeOptions.filter.isEmpty ? .empty : .noMatches(arrangeOptions.filter))
+            message.show(!arrangeOptions.filter.isEmpty ? .noMatches(arrangeOptions.filter)
+                         : (viewMode == .columns ? .none : .empty))
         } else {
             message.show(.none)
         }
@@ -397,46 +431,61 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
 
     func updateBottomBar() {
         guard isViewLoaded else { return }
-        bottomBar.isHidden = !Prefs.showPathBar
+        // A hidden view still takes part in layout: hand its strip to the content.
+        let shows = Prefs.showPathBar
+        if bottomBar.isHidden == shows {
+            bottomBar.isHidden = !shows
+            contentToBar.isActive = false
+            contentToBottom.isActive = false
+            if shows {
+                contentToBar.isActive = true
+            } else {
+                contentToBottom.isActive = true
+            }
+        }
+        // Nothing to show: no path, no status and no free-space lookup.
+        guard shows else { return }
         let selection = selectedItems
         if selection.count == 1 {
-            bottomBar.setPath(selection[0].url)
+            bottomBar.setPath(selection[0].url, icon: IconCache.shared.immediateIcon(for: selection[0]))
+        } else if isSearchResults {
+            // Results come from many folders: the one the search started in would mislead.
+            bottomBar.setPath(nil)
         } else {
             bottomBar.setPath(URL(fileURLWithPath: displayedPath, isDirectory: true))
         }
         guard Prefs.showStatusInfo else {
-            bottomBar.status.stringValue = ""
+            bottomBar.setStatus([])
             return
         }
-        var parts: [String] = []
-        if selection.isEmpty {
-            parts.append(Formatters.count(items.count, "item"))
-        } else {
-            parts.append("\(selection.count) of \(Formatters.count(items.count, "item")) selected")
-            let total = selection.reduce(Int64(0)) { $0 + max(0, $1.displaySize) }
-            if total > 0 { parts.append(Formatters.size(total)) }
+        // Finder's wording ("15 items, 43.05 GB available", "1 of 15 selected, …"),
+        // from most to least detailed: the bar shows the longest that fits.
+        let count = selection.isEmpty ? Formatters.count(items.count, "item")
+            : "\(selection.count.formatted()) of \(items.count.formatted()) selected"
+        let total = selection.reduce(Int64(0)) { $0 + max(0, $1.displaySize) }
+        let size: String? = total > 0 ? Formatters.size(total) : nil
+        let available: String? = isSearchResults ? nil : freeSpace().map { "\(Formatters.size($0)) available" }
+        var variants: [String] = []
+        for parts in [[count, size, available], [count, size], [count]] as [[String?]] {
+            let text = parts.compactMap { $0 }.joined(separator: ", ")
+            if !variants.contains(text) { variants.append(text) }
         }
-        if !isSearchResults, !isNarrow, let free = freeSpace() {
-            parts.append("\(Formatters.size(free)) available")
-        }
-        bottomBar.status.stringValue = parts.joined(separator: " · ")
+        bottomBar.setStatus(variants)
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        let narrow = view.bounds.width < 440
-        if narrow != isNarrow {
-            isNarrow = narrow
-            updateBottomBar()
-        }
+        message.maxTextWidth = min(320, max(120, contentContainer.bounds.width - 40))
     }
 
+    /// Finder's free space for this folder's volume, read and cached in the background by VolumeMonitor.
     private func freeSpace() -> Int64? {
-        let path = currentPath
-        if let cache = freeSpaceCache, cache.path == path, Date().timeIntervalSince(cache.at) < 10 { return cache.bytes }
-        let bytes = VolumeMonitor.availableCapacity(forPath: path)
-        freeSpaceCache = (path, bytes, Date())
-        return bytes
+        VolumeMonitor.shared.cachedAvailableCapacity(forPath: currentPath)
+    }
+
+    /// Any pane's fetch refreshes every pane (the dual-pane partner found it in flight).
+    @objc private func freeSpaceChanged(_ notification: Notification) {
+        updateBottomBar()
     }
 
     // MARK: - View mode, sorting, filtering
@@ -497,6 +546,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
     }
 
     @objc private func prefsDidChange(_ notification: Notification) {
+        if let key = notification.userInfo?[Prefs.changedKey] as? String, !Self.paneSettingKeys.contains(key) { return }
         var changed = false
         if arrangeOptions.showHidden != Prefs.showHiddenFiles {
             arrangeOptions.showHidden = Prefs.showHiddenFiles
@@ -507,9 +557,16 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
             changed = true
         }
         if changed { rearrange() }
-        content.appearanceSettingsDidChange()
+        // Prefs.didChange fires for every preference (favorites, the terminal…):
+        // only the view modes' own settings reload them.
+        let settings = ViewSettings()
+        if settings != viewSettings {
+            viewSettings = settings
+            content.appearanceSettingsDidChange()
+        }
+        bottomBar.syncIconSize(Prefs.iconSize)
         updateBottomBar()
-        delegate?.paneDidChangeLocation(self)
+        if changed { delegate?.paneDidChangeLocation(self) }
     }
 
     // MARK: - Search & filter
@@ -632,7 +689,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         searchResults = results
         let previous = items
         items = arrange(results)
-        if previous.isEmpty || items.count < 2000 {
+        if previous.isEmpty || done || items.count < 2000 {
             let selection = content.selectedItems
             content.display(items: items, directory: currentPath, changes: nil, reset: previous.isEmpty)
             content.select(selection, scroll: false)
@@ -1009,8 +1066,9 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
 
     @objc private func operationDidFinish(_ notification: Notification) {
         guard let operation = notification.object as? FileOperation else { return }
-        // Copies, moves and deletions change the free space shown in the bar.
-        freeSpaceCache = nil
+        // Copies, moves and deletions change the free space shown in the bar:
+        // refetch it, keeping the old value on screen until the new one arrives.
+        VolumeMonitor.shared.invalidateCapacities()
         updateBottomBar()
         guard operation.state == .finished else { return }
         let here = DirectoryReader.normalized(content.targetDirectory)
@@ -1297,10 +1355,30 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
         }
     }
 
+    /// The apps are looked up only when the submenu opens (menuNeedsUpdate):
+    /// LaunchServices and the app icons would otherwise delay every right-click.
     private func openWithMenuItem(for targets: [FileItem]) -> NSMenuItem {
         let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        if let first = targets.first(where: { !$0.isNavigable }) {
+        let submenu = NSMenu(title: "Open With")
+        submenu.identifier = Self.openWithMenuID
+        submenu.delegate = self
+        openWithTargets = targets
+        // A placeholder, so the item never shows an empty submenu.
+        submenu.addItem(openWithOtherItem())
+        item.submenu = submenu
+        return item
+    }
+
+    private func openWithOtherItem() -> NSMenuItem {
+        let other = NSMenuItem(title: "Other…", action: #selector(openWithOther(_:)), keyEquivalent: "")
+        other.target = self
+        return other
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu.identifier == Self.openWithMenuID else { return }
+        menu.removeAllItems()
+        if let first = openWithTargets.first(where: { !$0.isNavigable }) {
             let workspace = NSWorkspace.shared
             let defaultApp = workspace.urlForApplication(toOpen: first.url)
             var apps = workspace.urlsForApplications(toOpen: first.url)
@@ -1318,16 +1396,12 @@ final class PaneViewController: NSViewController, NSMenuItemValidation {
                 let icon = workspace.icon(forFile: app.path)
                 icon.size = NSSize(width: 16, height: 16)
                 entry.image = icon
-                submenu.addItem(entry)
-                if index == 0 && app == defaultApp && apps.count > 1 { submenu.addItem(.separator()) }
+                menu.addItem(entry)
+                if index == 0 && app == defaultApp && apps.count > 1 { menu.addItem(.separator()) }
             }
         }
-        submenu.addItem(.separator())
-        let other = NSMenuItem(title: "Other…", action: #selector(openWithOther(_:)), keyEquivalent: "")
-        other.target = self
-        submenu.addItem(other)
-        item.submenu = submenu
-        return item
+        menu.addItem(.separator())
+        menu.addItem(openWithOtherItem())
     }
 
     // MARK: - Validation

@@ -17,12 +17,14 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         panel.hidesOnDeactivate = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
+        panel.titlebarSeparatorStyle = .none
         super.init(window: panel)
         panel.delegate = self
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 18, right: 18)
+        // 6 pt between rows of a group, 18 pt between groups (see rebuild()).
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 20, right: 20)
         stack.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView()
         content.addSubview(stack)
@@ -131,11 +133,9 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
             density.action = #selector(densityChanged(_:))
             rows.append([label("Icon size:"), density])
         case .icons:
+            // No tick marks, like Finder's; it takes the popups' column width.
             let slider = NSSlider(value: Double(Prefs.iconSize), minValue: 32, maxValue: 256,
                                   target: self, action: #selector(iconSizeChanged(_:)))
-            slider.numberOfTickMarks = 8
-            slider.allowsTickMarkValuesOnly = false
-            slider.widthAnchor.constraint(equalToConstant: 140).isActive = true
             rows.append([label("Icon size:"), slider])
             rows.append([NSGridCell.emptyContentView, valueLabel("\(Int(Prefs.iconSize)) × \(Int(Prefs.iconSize))")])
         default:
@@ -145,28 +145,33 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         grid.rowSpacing = 8
         grid.columnSpacing = 8
         grid.column(at: 0).xPlacement = .trailing
+        // Every popup (and the slider) as wide as the widest one, like Finder's.
+        grid.column(at: 1).xPlacement = .fill
         grid.rowAlignment = .firstBaseline
         stack.addArrangedSubview(grid)
+        stack.setCustomSpacing(12, after: grid)
 
-        stack.addArrangedSubview(checkbox("Keep folders on top", Prefs.foldersOnTop, #selector(toggleFoldersOnTop(_:))))
+        // Whitespace, not separator lines, sets the groups apart.
+        let keepFoldersBox = checkbox("Keep folders on top", Prefs.foldersOnTop, #selector(toggleFoldersOnTop(_:)))
+        stack.addArrangedSubview(keepFoldersBox)
+        stack.setCustomSpacing(18, after: keepFoldersBox)
 
         if mode == .list {
-            stack.addArrangedSubview(separator())
             stack.addArrangedSubview(heading("Show Columns:"))
             let visible = Set(Prefs.listColumns)
             for column in ListColumn.allCases where column != .name {
                 let box = checkbox(column.title, visible.contains(column.rawValue), #selector(toggleColumn(_:)))
                 box.identifier = NSUserInterfaceItemIdentifier(column.rawValue)
+                // 23 pt: the indented boxes start where the other checkboxes' titles do.
                 let indent = NSStackView(views: [box])
-                indent.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 0)
+                indent.edgeInsets = NSEdgeInsets(top: 0, left: 23, bottom: 0, right: 0)
                 stack.addArrangedSubview(indent)
             }
-            stack.setCustomSpacing(6, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 1])
+            stack.setCustomSpacing(18, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 1])
         }
 
-        stack.addArrangedSubview(separator())
         stack.addArrangedSubview(checkbox("Calculate all sizes", Prefs.calculateFolderSizes, #selector(toggleSizes(_:))))
-        if mode == .list || mode == .icons {
+        if mode == .list || mode == .icons || mode == .columns {
             stack.addArrangedSubview(checkbox("Show icon preview", Prefs.showThumbnailsInList, #selector(togglePreviews(_:))))
         }
         stack.addArrangedSubview(checkbox("Show hidden files", Prefs.showHiddenFiles, #selector(toggleHidden(_:))))
@@ -176,12 +181,8 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         let centered = NSStackView(views: [defaults])
         centered.alignment = .centerX
         stack.addArrangedSubview(centered)
-        centered.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
-        stack.setCustomSpacing(16, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
-
-        for view in stack.arrangedSubviews where view is NSBox {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
-        }
+        centered.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
         fit()
     }
 
@@ -191,7 +192,14 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         let size = NSSize(width: 270, height: stack.fittingSize.height)
         var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
         frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
-        window.setFrame(frame, display: true, animate: window.isVisible)
+        guard frame != window.frame else { return }
+        // The animator proxy resizes without blocking the main thread (and
+        // the browser's own view switch with it).
+        if window.isVisible {
+            window.animator().setFrame(frame, display: true)
+        } else {
+            window.setFrame(frame, display: true)
+        }
     }
 
     private func label(_ text: String) -> NSTextField {
@@ -205,16 +213,9 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         return field
     }
 
+    /// Regular label text, like Finder's "Sort By:" (its panel has no bold text).
     private func heading(_ text: String) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        return field
-    }
-
-    private func separator() -> NSBox {
-        let box = NSBox()
-        box.boxType = .separator
-        return box
+        NSTextField(labelWithString: text)
     }
 
     private func checkbox(_ title: String, _ on: Bool, _ action: Selector) -> NSButton {
@@ -248,7 +249,10 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func iconSizeChanged(_ sender: NSSlider) {
-        let size = CGFloat(sender.doubleValue.rounded())
+        // Multiples of 4 keep icons centred on whole points; unchanged sizes
+        // post nothing (Prefs posts on every write).
+        let size = CGFloat((sender.doubleValue / 4).rounded() * 4)
+        guard size != Prefs.iconSize else { return }
         applying { Prefs.iconSize = size }
         if let grid = stack.arrangedSubviews.first as? NSGridView, grid.numberOfRows > 3,
            let value = grid.cell(atColumnIndex: 1, rowIndex: 3).contentView as? NSTextField {

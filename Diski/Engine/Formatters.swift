@@ -26,6 +26,8 @@ enum Formatters {
         case .long: f.dateStyle = .long; f.timeStyle = .short
         case .full: f.dateStyle = .full; f.timeStyle = .short
         }
+        f.locale = Locale.autoupdatingCurrent
+        f.timeZone = TimeZone.autoupdatingCurrent
         return f
     }
 
@@ -33,6 +35,8 @@ enum Formatters {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .short
+        f.locale = Locale.autoupdatingCurrent
+        f.timeZone = TimeZone.autoupdatingCurrent
         return f
     }()
 
@@ -40,7 +44,34 @@ enum Formatters {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
+        f.locale = Locale.autoupdatingCurrent
+        f.timeZone = TimeZone.autoupdatingCurrent
         return f
+    }()
+
+    /// List cells ask for the same few dates and sizes on every reload and
+    /// scroll: formatted once, keyed by minute and length / by byte count.
+    private static let dateStrings: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 4096
+        return cache
+    }()
+
+    private static let sizeStrings: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 4096
+        return cache
+    }()
+
+    /// A new locale or time zone moves "Today" and changes every cached string.
+    private static let changeObservers: [NSObjectProtocol] = {
+        let names: [Notification.Name] = [NSLocale.currentLocaleDidChangeNotification, .NSSystemTimeZoneDidChange]
+        return names.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Formatters.refreshDayBoundaries()
+                Formatters.sizeStrings.removeAllObjects()
+            }
+        }
     }()
 
     private static let byteFormatter: ByteCountFormatter = {
@@ -70,12 +101,24 @@ enum Formatters {
     /// Call when the day changes or the locale/time zone changes.
     static func refreshDayBoundaries() {
         dayBoundaries = computeBoundaries()
+        dateStrings.removeAllObjects()
     }
 
     /// "Today, 5:15 PM" / "Yesterday, 3:52 PM" / "9/20/26, 8:17 PM" (`.short`).
     static func listDate(_ seconds: Double, length: DateLength = .short) -> String {
         guard seconds > 0 else { return "--" }
+        _ = changeObservers
         if Date().timeIntervalSince1970 >= dayBoundaries.tomorrow { refreshDayBoundaries() }
+        // Every format stops at minutes and day boundaries fall on whole
+        // minutes, so one string serves a whole minute.
+        let key: NSNumber? = seconds < 1e13 ? NSNumber(value: Int64(seconds / 60) &* 8 &+ Int64(length.rawValue)) : nil
+        if let key, let cached = dateStrings.object(forKey: key) { return cached as String }
+        let text = formatListDate(seconds, length: length)
+        if let key { dateStrings.setObject(text as NSString, forKey: key) }
+        return text
+    }
+
+    private static func formatListDate(_ seconds: Double, length: DateLength) -> String {
         let b = dayBoundaries
         let date = Date(timeIntervalSince1970: seconds)
         let relative = seconds >= b.today && seconds < b.tomorrow ? "Today"
@@ -98,7 +141,12 @@ enum Formatters {
         if bytes < 0 { return "--" }
         // Finder's wording for empty items (the formatter would say "Zero KB").
         if bytes == 0 { return "Zero bytes" }
-        return byteFormatter.string(fromByteCount: bytes)
+        _ = changeObservers
+        let key = NSNumber(value: bytes)
+        if let cached = sizeStrings.object(forKey: key) { return cached as String }
+        let text = byteFormatter.string(fromByteCount: bytes)
+        sizeStrings.setObject(text as NSString, forKey: key)
+        return text
     }
 
     static func preciseSize(_ bytes: Int64) -> String {

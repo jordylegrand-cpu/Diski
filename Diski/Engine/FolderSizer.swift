@@ -16,15 +16,19 @@ final class FolderSizer {
     private var cache: [String: Result] = [:]
     private var jobs: [String: Walk] = [:]
     private var waiting: [String: [(Result) -> Void]] = [:]
+    /// Callers that asked while their folder's walk was already stale: they get
+    /// that walk's result and then the one of a fresh walk.
+    private var rerunWaiters: [String: [(Result) -> Void]] = [:]
+    /// Walks not started yet, newest last (started first: the rows on screen
+    /// now matter more than the ones scrolled past).
+    private var pending: [(path: String, walk: Walk)] = []
     /// Two walks at a time; each walk is itself parallel.
-    private let queue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "app.diski.foldersize"
-        queue.qualityOfService = .utility
-        queue.maxConcurrentOperationCount = 2
-        return queue
-    }()
-    private var operations: [String: Operation] = [:]
+    private var running = 0
+    private let workQueue = DispatchQueue(label: "app.diski.foldersize", qos: .utility, attributes: .concurrent)
+    /// Folders whose next walk waits a little because they keep changing.
+    private var deferred = Set<String>()
+    /// When the last walk of a slow folder ended and how long it took.
+    private var lastWalks: [String: (end: Date, duration: TimeInterval)] = [:]
     private let maxAge: TimeInterval = 180
 
     func cached(_ path: String) -> Result? {
@@ -36,9 +40,13 @@ final class FolderSizer {
         return result
     }
 
-    /// Whether an up-to-date walk of `path` is running (a walk whose folder
-    /// changed while it ran does not count).
-    func isComputing(_ path: String) -> Bool { jobs[path].map { !$0.isStale } ?? false }
+    /// Whether an up-to-date walk of `path` is running or scheduled (a walk
+    /// whose folder changed while it ran only counts once a rerun is queued).
+    func isComputing(_ path: String) -> Bool {
+        if deferred.contains(path) { return true }
+        guard let walk = jobs[path] else { return false }
+        return !walk.isStale || rerunWaiters[path] != nil
+    }
 
     /// Computes (or returns the cached) size; `completion` runs on the main thread.
     func size(of path: String, progress: ((Int64) -> Void)? = nil, completion: @escaping (Result) -> Void) {
@@ -48,43 +56,92 @@ final class FolderSizer {
         }
         waiting[path, default: []].append(completion)
         if let running = jobs[path] {
-            guard running.isStale else { return }
-            // The folder changed since this walk started: start over, keeping the waiters.
-            running.cancel()
-            operations.removeValue(forKey: path)?.cancel()
+            // A walk that went stale still finishes (a folder that keeps changing
+            // would otherwise never get a size); a fresh walk follows it.
+            if running.isStale { rerunWaiters[path, default: []].append(completion) }
+            return
         }
+        if deferred.contains(path) { return }
+        schedule(path, progress: progress)
+    }
+
+    /// Starts a walk now, or after a pause of twice the last walk's duration
+    /// (at most 10 s) for a slow folder that was just walked: a folder that
+    /// keeps changing is walked about a third of the time instead of nonstop.
+    private func schedule(_ path: String, progress: ((Int64) -> Void)?) {
+        if let last = lastWalks[path] {
+            let delay = last.end.addingTimeInterval(min(10, last.duration * 2)).timeIntervalSinceNow
+            if delay > 0.02 {
+                deferred.insert(path)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.deferred.remove(path) != nil, self.waiting[path] != nil else { return }
+                    self.startWalk(path, progress: progress)
+                }
+                return
+            }
+        }
+        startWalk(path, progress: progress)
+    }
+
+    private func startWalk(_ path: String, progress: ((Int64) -> Void)?) {
         let walk = Walk(root: path)
         jobs[path] = walk
         walk.onProgress = progress.map { callback in
             { bytes in DispatchQueue.main.async { callback(bytes) } }
         }
-        let operation = BlockOperation { [weak self] in
-            let (bytes, items) = walk.isCancelled ? (0, 0) : walk.run()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard self.jobs[path] === walk else { return }
-                self.jobs.removeValue(forKey: path)
-                self.operations.removeValue(forKey: path)
-                guard !walk.isCancelled else {
-                    self.waiting.removeValue(forKey: path)
-                    return
+        pending.append((path: path, walk: walk))
+        startPendingWalks()
+    }
+
+    private func startPendingWalks() {
+        while running < 2, let next = pending.popLast() {
+            // Cancelled or replaced walks are simply dropped here.
+            guard jobs[next.path] === next.walk, !next.walk.isCancelled else { continue }
+            running += 1
+            let walk = next.walk, path = next.path, start = Date()
+            workQueue.async { [weak self] in
+                let (bytes, items) = walk.isCancelled ? (Int64(0), 0) : walk.run()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.running -= 1
+                    self.finish(path, walk: walk, bytes: bytes, items: items,
+                                duration: Date().timeIntervalSince(start))
+                    self.startPendingWalks()
                 }
-                let result = Result(bytes: bytes, items: items, computedAt: Date())
-                // A walk that raced with changes is still worth showing, but not caching.
-                if !walk.isStale { self.cache[path] = result }
-                let callbacks = self.waiting.removeValue(forKey: path) ?? []
-                for callback in callbacks { callback(result) }
             }
         }
-        operations[path] = operation
-        queue.addOperation(operation)
+    }
+
+    private func finish(_ path: String, walk: Walk, bytes: Int64, items: Int, duration: TimeInterval) {
+        guard jobs[path] === walk else { return }
+        jobs.removeValue(forKey: path)
+        guard !walk.isCancelled else {
+            waiting[path] = nil
+            rerunWaiters[path] = nil
+            return
+        }
+        // Only slow folders are remembered (and so ever deferred).
+        if duration >= 0.01 {
+            lastWalks[path] = (end: Date(), duration: duration)
+        } else {
+            lastWalks.removeValue(forKey: path)
+        }
+        let result = Result(bytes: bytes, items: items, computedAt: Date())
+        // A walk that raced with changes is still worth showing, but not caching.
+        if !walk.isStale { cache[path] = result }
+        for callback in waiting.removeValue(forKey: path) ?? [] { callback(result) }
+        if let again = rerunWaiters.removeValue(forKey: path), !again.isEmpty {
+            waiting[path, default: []].append(contentsOf: again)
+            if jobs[path] == nil && !deferred.contains(path) { schedule(path, progress: nil) }
+        }
     }
 
     /// Cancels pending and running walks of the direct children of `parent`
     /// (called when the user leaves a folder).
     func cancelJobs(inside parent: String) {
         let prefix = parent == "/" ? "/" : parent + "/"
-        for path in Array(jobs.keys) where path.hasPrefix(prefix) && !path.dropFirst(prefix.count).contains("/") {
+        let candidates = Set(jobs.keys).union(deferred)
+        for path in candidates where path.hasPrefix(prefix) && !path.dropFirst(prefix.count).contains("/") {
             cancel(path)
         }
     }
@@ -92,8 +149,9 @@ final class FolderSizer {
     func cancel(_ path: String) {
         jobs[path]?.cancel()
         jobs.removeValue(forKey: path)
-        operations.removeValue(forKey: path)?.cancel()
+        deferred.remove(path)
         waiting.removeValue(forKey: path)
+        rerunWaiters.removeValue(forKey: path)
     }
 
     /// Drops cached sizes of every folder containing one of `changedPaths`, and
@@ -102,7 +160,7 @@ final class FolderSizer {
         guard !cache.isEmpty || !jobs.isEmpty else { return }
         var seen = Set<String>()
         for changed in changedPaths {
-            var path = changed.count > 1 && changed.hasSuffix("/") ? String(changed.dropLast()) : changed
+            var path = changed.utf8.count > 1 && changed.utf8.last == UInt8(ascii: "/") ? String(changed.dropLast()) : changed
             // Walk up the ancestors: a few hash lookups per event instead of
             // comparing every event with every cached folder.
             while seen.insert(path).inserted {
@@ -156,6 +214,8 @@ final class FolderSizer {
         }
 
         private func work() {
+            // One read buffer per worker thread, made at its first folder and reused for the rest.
+            var buffer: DirectoryReader.Buffer?
             while true {
                 condition.lock()
                 while stack.isEmpty && active > 0 && !cancelled {
@@ -174,7 +234,9 @@ final class FolderSizer {
                 var localBytes: Int64 = 0
                 var localItems = 0
                 let prefix = directory == "/" ? "/" : directory + "/"
-                try? DirectoryReader.forEachRawEntry(inDirectory: directory) { entry in
+                let reader = buffer ?? DirectoryReader.Buffer()
+                buffer = reader
+                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader) { entry in
                     localItems += 1
                     if entry.isDirectory {
                         if !entry.isMountPoint { subdirectories.append(prefix + entry.nameString) }

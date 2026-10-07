@@ -16,8 +16,16 @@ final class OperationRowView: NSView {
     private let stopButton = NSButton()
     private var detailBelowBar: NSLayoutConstraint!
     private var detailBelowTitle: NSLayoutConstraint!
+    /// Shared symbol images: update() runs ten times a second.
+    private static let pauseImage = NSImage(systemSymbolName: "pause.circle.fill", accessibilityDescription: "Pause")
+    private static let resumeImage = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "Resume")
+    /// What update() last applied, so unchanged ticks touch nothing.
+    private var shownPaused: Bool?
+    private var shownDone: Bool?
 
-    init(operation: FileOperation) {
+    /// `compact` rows (the finished popover) hug their text; window rows
+    /// keep Finder's 76 pt and centre the text block when it is shorter.
+    init(operation: FileOperation, compact: Bool = false) {
         self.operation = operation
         super.init(frame: NSRect(x: 0, y: 0, width: 460, height: 76))
 
@@ -57,14 +65,27 @@ final class OperationRowView: NSView {
         }
         detailBelowBar = detail.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4)
         detailBelowTitle = detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2)
-        NSLayoutConstraint.activate([
+        // The text block (title to detail) is centred on the row, like the
+        // icon; the low-priority hug makes the row 13 pt taller than the
+        // block on each side unless a minimum height holds it open.
+        let block = NSLayoutGuide()
+        addLayoutGuide(block)
+        let hug = title.topAnchor.constraint(equalTo: topAnchor, constant: 13)
+        hug.priority = .defaultLow
+        var constraints: [NSLayoutConstraint] = [
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 13),
+            title.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 13),
+            block.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            block.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            block.topAnchor.constraint(equalTo: title.topAnchor),
+            block.bottomAnchor.constraint(equalTo: detail.bottomAnchor),
+            block.centerYAnchor.constraint(equalTo: centerYAnchor),
+            hug,
             bar.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             bar.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
             pauseButton.leadingAnchor.constraint(equalTo: bar.trailingAnchor, constant: 8),
@@ -74,9 +95,11 @@ final class OperationRowView: NSView {
             stopButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
-            detail.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -13),
+            detail.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -13),
             detailBelowBar,
-        ])
+        ]
+        if !compact { constraints.append(heightAnchor.constraint(greaterThanOrEqualToConstant: 76)) }
+        NSLayoutConstraint.activate(constraints)
         update()
     }
 
@@ -94,16 +117,26 @@ final class OperationRowView: NSView {
 
     func update() {
         let done = operation.state.isDone
-        bar.isHidden = done
-        pauseButton.isHidden = done
-        stopButton.isHidden = done
-        detailBelowBar.isActive = !done
-        detailBelowTitle.isActive = done
+        if done != shownDone {
+            shownDone = done
+            bar.isHidden = done
+            pauseButton.isHidden = done
+            stopButton.isHidden = done
+            // Deactivate first, so the two never hold at the same time.
+            if done {
+                detailBelowBar.isActive = false
+                detailBelowTitle.isActive = true
+                bar.stopAnimation(nil)
+            } else {
+                detailBelowTitle.isActive = false
+                detailBelowBar.isActive = true
+            }
+        }
+        let newTitle: String
         if done {
-            bar.stopAnimation(nil)
-            title.stringValue = finishedTitle
+            newTitle = finishedTitle
         } else {
-            title.stringValue = operation.title
+            newTitle = operation.title
             let snapshot = operation.snapshot
             let indeterminate = snapshot.scanning && snapshot.totalBytes == 0 && snapshot.totalItems == 0
             if bar.isIndeterminate != indeterminate {
@@ -112,16 +145,24 @@ final class OperationRowView: NSView {
             }
             if !indeterminate { bar.doubleValue = operation.fractionCompleted }
             let paused = operation.isPaused
-            pauseButton.image = NSImage(systemSymbolName: paused ? "play.circle.fill" : "pause.circle.fill",
-                                        accessibilityDescription: paused ? "Resume" : "Pause")
-            pauseButton.toolTip = paused ? "Resume" : "Pause"
+            if paused != shownPaused {
+                shownPaused = paused
+                pauseButton.image = paused ? Self.resumeImage : Self.pauseImage
+                pauseButton.toolTip = paused ? "Resume" : "Pause"
+            }
         }
-        detail.stringValue = detailText
+        // Unchanged strings are not reassigned: each assignment invalidates
+        // the label's intrinsic size and costs a layout pass.
+        if title.stringValue != newTitle { title.stringValue = newTitle }
+        let text = detailText
+        if detail.stringValue != text { detail.stringValue = text }
+        let color: NSColor
         if case .failed = operation.state {
-            detail.textColor = .systemRed
+            color = .systemRed
         } else {
-            detail.textColor = .secondaryLabelColor
+            color = .secondaryLabelColor
         }
+        if detail.textColor != color { detail.textColor = color }
     }
 
     private var finishedTitle: String {
@@ -168,7 +209,7 @@ final class OperationRowView: NSView {
             if s.totalBytes > 0 {
                 parts.append("\(Formatters.size(s.completedBytes)) of \(Formatters.size(s.totalBytes))\(s.scanning ? "+" : "")")
             } else if s.totalItems > 0 {
-                parts.append("\(s.completedItems) of \(s.totalItems) items")
+                parts.append("\(s.completedItems.formatted()) of \(Formatters.count(s.totalItems, "item"))")
             } else {
                 parts.append("Preparing…")
             }
@@ -200,7 +241,14 @@ final class HairlineView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let scale = window?.backingScaleFactor ?? 2
         NSColor.separatorColor.setFill()
-        NSRect(x: 0, y: bounds.midY - 0.5 / scale, width: bounds.width, height: 1 / scale).fill()
+        // Snapped to a whole device pixel row: y=0 at 1x, 0.5 pt at 2x.
+        let y = (bounds.midY * scale).rounded(.down) / scale
+        NSRect(x: 0, y: y, width: bounds.width, height: 1 / scale).fill()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
     }
 }
 
@@ -231,6 +279,7 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.fullScreenAuxiliary]
+        panel.titlebarSeparatorStyle = .none
         super.init(window: panel)
         panel.delegate = self
 
@@ -328,16 +377,11 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
             shown = wanted
             for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
             var kept: [ObjectIdentifier: OperationRowView] = [:]
-            for (index, operation) in wanted.enumerated() {
+            // No lines between rows: each row's padding separates them.
+            for operation in wanted {
                 let id = ObjectIdentifier(operation)
                 let row = rows[id] ?? OperationRowView(operation: operation)
                 kept[id] = row
-                if index > 0 {
-                    let line = HairlineView()
-                    line.translatesAutoresizingMaskIntoConstraints = false
-                    stack.addArrangedSubview(line)
-                    line.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-                }
                 row.translatesAutoresizingMaskIntoConstraints = false
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -360,7 +404,13 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
         var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: 460, height: height)))
         // Grow and shrink downwards from the title bar.
         frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
-        window.setFrame(frame, display: true, animate: window.isVisible)
+        guard frame != window.frame else { return }
+        // The animator proxy resizes without blocking the main thread.
+        if window.isVisible {
+            window.animator().setFrame(frame, display: true)
+        } else {
+            window.setFrame(frame, display: true)
+        }
     }
 
     private static let positionKey = "DiskiProgressWindowTopLeft"
@@ -465,17 +515,25 @@ final class OperationsToolbarView: NSView {
     func update(with operations: [FileOperation]) {
         let active = operations.filter { !$0.state.isDone }
         let finished = !operations.isEmpty && active.isEmpty
-        check.isHidden = !finished
-        indicator.isHidden = finished
+        // Called ten times a second: only real changes reach the views.
+        if check.isHidden == finished { check.isHidden = !finished }
+        if indicator.isHidden != finished { indicator.isHidden = finished }
         if !active.isEmpty {
             let fraction = active.reduce(0.0) { $0 + $1.fractionCompleted } / Double(active.count)
-            indicator.doubleValue = max(0.02, fraction)
+            let value = max(0.02, fraction)
+            if abs(indicator.doubleValue - value) > 0.002 { indicator.doubleValue = value }
         }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
+    // Acts on mouse-up inside, like a native button; a press dragged away does nothing.
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
     }
+
+    /// Not part of the toolbar's window-drag region, so the click arrives.
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override func accessibilityPerformPress() -> Bool {
         onClick?()
@@ -495,9 +553,10 @@ enum OperationFinishedPopover {
     static func show(_ operation: FileOperation, relativeTo view: NSView) {
         popover?.close()
         let controller = NSViewController()
-        let row = OperationRowView(operation: operation)
-        row.frame = NSRect(x: 0, y: 0, width: 380, height: 60)
+        let row = OperationRowView(operation: operation, compact: true)
         row.translatesAutoresizingMaskIntoConstraints = false
+        // As wide as the message (18 + icon + 12 + text + 18), within 240...380.
+        let width = min(380, max(240, row.fittingSize.width.rounded(.up)))
         let container = NSView()
         container.addSubview(row)
         NSLayoutConstraint.activate([
@@ -505,7 +564,7 @@ enum OperationFinishedPopover {
             row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             row.topAnchor.constraint(equalTo: container.topAnchor),
             row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            container.widthAnchor.constraint(equalToConstant: 380),
+            container.widthAnchor.constraint(equalToConstant: width),
         ])
         controller.view = container
         let popover = NSPopover()
@@ -578,11 +637,16 @@ enum ConflictDialog {
 
     /// "Existing: Today, 6:59 PM · 2.1 GB (newer)".
     private static func describe(_ title: String, _ info: ConflictItemInfo, comparedTo other: ConflictItemInfo) -> String {
-        var parts = [info.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .medium) } ?? "--"]
-        parts.append(info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--"))
+        let date = info.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .medium) } ?? "--"
+        let otherDate = other.modified.map { Formatters.listDate($0.timeIntervalSince1970, length: .medium) } ?? "--"
+        let sizeText = info.size.map { Formatters.size($0) } ?? (info.isDirectory ? "Folder" : "--")
+        let otherSizeText = other.size.map { Formatters.size($0) } ?? (other.isDirectory ? "Folder" : "--")
+        let parts = [date, sizeText]
+        // Marked only when the shown values differ too: "(newer)" next to two
+        // identical times reads as a mistake.
         var marks: [String] = []
-        if (info.modified ?? .distantPast) > (other.modified ?? .distantPast) { marks.append("newer") }
-        if (info.size ?? 0) > (other.size ?? 0) { marks.append("larger") }
+        if date != otherDate && (info.modified ?? .distantPast) > (other.modified ?? .distantPast) { marks.append("newer") }
+        if sizeText != otherSizeText && (info.size ?? 0) > (other.size ?? 0) { marks.append("larger") }
         let suffix = marks.isEmpty ? "" : " (" + marks.joined(separator: ", ") + ")"
         return "\(title): " + parts.joined(separator: " · ") + suffix
     }

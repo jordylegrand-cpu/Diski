@@ -38,6 +38,8 @@ shoot() {
 }
 
 shoot list     -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "6aaad54bb2b1e1dde7d2ff9c_OLDERNEW" -DiskiCIExpand "Misc"
+# Finder's own row density (small icons, 20-pt rows): the 1:1 check against finder-list.jpg.
+shoot list-compact -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "6aaad54bb2b1e1dde7d2ff9c_OLDERNEW" -rowDensity 0
 shoot columns  -DiskiCIPath "$DEMO/Misc" -DiskiCIViewMode 2 -DiskiCISelect "p2qkn5l7k2bp0mc0"
 shoot viewoptions -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCIViewOptions YES
 shoot getinfo  -DiskiCIPath "$DEMO" -DiskiCIViewMode 1 -DiskiCISelect "Hill and Houses, Cape Elizabeth, Maine – Edward Hopper – 1927.jpg" -DiskiCIGetInfo YES

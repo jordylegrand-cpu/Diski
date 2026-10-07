@@ -23,6 +23,10 @@ final class SearchEngine: NSObject {
     private var results: [FileItem] = []
     private var seen = Set<String>()
     private let maxResults = 5000
+    /// Spotlight results already read while the query gathers.
+    private var gatheredCount = 0
+    /// Builds Spotlight result items (lstat, xattrs) off the main thread, in order.
+    private let itemQueue = DispatchQueue(label: "app.diski.search.items", qos: .userInitiated)
 
     private init(kind: Kind, handler: @escaping Handler) {
         self.kind = kind
@@ -83,12 +87,15 @@ final class SearchEngine: NSObject {
     // MARK: Recursive walk
 
     private func startRecursive(base: String, text: String, showHidden: Bool) {
-        let needle = text
+        let matcher = NameMatcher(text)
+        let limit = maxResults
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let condition = NSCondition()
             var stack = [base]
             var active = 0
+            // Matches found so far (guarded by `condition`); the walk stops at `limit`.
+            var total = 0
             var found: [FileItem] = []
             var lastFlush = Date()
             let workers = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount))
@@ -110,10 +117,12 @@ final class SearchEngine: NSObject {
             }
 
             DispatchQueue.concurrentPerform(iterations: workers) { _ in
+                // One read buffer per worker thread, made at its first folder and reused for the rest.
+                var buffer: DirectoryReader.Buffer?
                 while true {
                     condition.lock()
-                    while stack.isEmpty && active > 0 && !self.isCancelled { condition.wait() }
-                    if self.isCancelled || (stack.isEmpty && active == 0) {
+                    while stack.isEmpty && active > 0 && total < limit && !self.isCancelled { condition.wait() }
+                    if self.isCancelled || total >= limit || (stack.isEmpty && active == 0) {
                         condition.broadcast()
                         condition.unlock()
                         return
@@ -124,15 +133,22 @@ final class SearchEngine: NSObject {
 
                     var subdirectories: [String] = []
                     var matches: [FileItem] = []
-                    try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true) { item in
+                    let reader = buffer ?? DirectoryReader.Buffer()
+                    buffer = reader
+                    // Only folders (to recurse into) and matching names become items.
+                    try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true, buffer: reader,
+                                                      include: { name, type in
+                                                          type == DirectoryReader.vDIR || matcher.matches(cString: name)
+                                                      }) { item in
                         if !showHidden && item.isHidden { return }
-                        if ItemArranger.matches(item.name, filter: needle) { matches.append(item) }
+                        if !item.isDirectoryOnDisk || matcher.matches(item) { matches.append(item) }
                         if item.type == .directory && !item.isMountPoint { subdirectories.append(item.path) }
                     }
 
                     condition.lock()
                     stack.append(contentsOf: subdirectories)
                     found.append(contentsOf: matches)
+                    total += matches.count
                     active -= 1
                     condition.broadcast()
                     condition.unlock()
@@ -185,19 +201,31 @@ final class SearchEngine: NSObject {
     private func collectSpotlightResults(done: Bool) {
         guard let query, !isCancelled else { return }
         query.disableUpdates()
-        let count = min(query.resultCount, maxResults)
+        let total = min(query.resultCount, maxResults)
+        // While gathering, results are only appended: read just the new ones.
+        // Live updates and the final pass look at all of them.
+        let first = (done || !isRunning) ? 0 : min(gatheredCount, total)
         var paths: [String] = []
-        paths.reserveCapacity(count)
-        for index in 0..<count {
+        for index in first..<max(first, total) {
             if let item = query.result(at: index) as? NSMetadataItem,
-               let path = item.value(forAttribute: NSMetadataItemPathKey) as? String {
+               let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
+               !seen.contains(path) {
                 paths.append(path)
             }
         }
+        gatheredCount = total
         query.enableUpdates()
-        let newPaths = paths.filter { !seen.contains($0) }
-        let items = newPaths.compactMap { FileItem.make(path: $0) }
-        for item in items where seen.insert(item.path).inserted { results.append(item) }
-        handler(results, done)
+        guard !paths.isEmpty || done else { return }
+        // The serial queue keeps batches in order, so `done` always arrives last.
+        itemQueue.async { [weak self] in
+            let items = paths.compactMap { FileItem.make(path: $0) }
+            DispatchQueue.main.async {
+                guard let self, !self.isCancelled, !items.isEmpty || done else { return }
+                for item in items where self.results.count < self.maxResults {
+                    if self.seen.insert(item.path).inserted { self.results.append(item) }
+                }
+                self.handler(self.results, done)
+            }
+        }
     }
 }

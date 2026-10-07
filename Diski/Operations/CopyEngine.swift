@@ -356,6 +356,8 @@ final class CopyEngine {
         let workers = max(1, streams)
 
         DispatchQueue.concurrentPerform(iterations: workers) { _ in
+            // One read buffer per worker thread, reused for every folder it scans; never shared.
+            let buffer = DirectoryReader.Buffer()
             while let task = queue.next(cancelled: { self.operation.isCancelled }) {
                 guard operation.waitIfPaused() else {
                     _ = queue.done(task)
@@ -363,7 +365,7 @@ final class CopyEngine {
                 }
                 switch task {
                 case let .directory(s, d, exists):
-                    if !copyDirectoryEntries(src: s, dst: d, exists: exists, queue: queue) {
+                    if !copyDirectoryEntries(src: s, dst: d, exists: exists, queue: queue, buffer: buffer) {
                         queue.condition.lock(); queue.failed = true; queue.condition.unlock()
                     }
                 case let .file(s, d, size, symlink):
@@ -387,7 +389,8 @@ final class CopyEngine {
     }
 
     /// Creates `dst` and queues the children of `src`.
-    private func copyDirectoryEntries(src: String, dst: String, exists: Bool, queue: TaskQueue) -> Bool {
+    private func copyDirectoryEntries(src: String, dst: String, exists: Bool, queue: TaskQueue,
+                                      buffer: DirectoryReader.Buffer) -> Bool {
         if !exists {
             if mkdir(dst, 0o700) != 0 && errno != EEXIST {
                 recordError("Folder “\((dst as NSString).lastPathComponent)” couldn’t be created: \(String(cString: strerror(errno)))")
@@ -402,7 +405,7 @@ final class CopyEngine {
         var discoveredFiles = 0
         var ok = true
         do {
-            try DirectoryReader.forEachRawEntry(inDirectory: src) { entry in
+            try DirectoryReader.forEachRawEntry(inDirectory: src, buffer: buffer) { entry in
                 let name = entry.nameString
                 let s = join(src, name)
                 let d = join(dst, name)

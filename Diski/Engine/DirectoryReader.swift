@@ -39,7 +39,19 @@ enum DirectoryReader {
     static let vDIR: UInt32 = 2
     static let vLNK: UInt32 = 5
 
-    private static let bufferSize = 256 * 1024
+    /// A `getattrlistbulk` buffer that a walk reuses for every folder it reads.
+    /// One buffer per thread: it is never shared between threads.
+    final class Buffer {
+        let pointer: UnsafeMutableRawPointer
+        let size: Int
+
+        init(size: Int = 256 * 1024) {
+            self.size = size
+            pointer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
+        }
+
+        deinit { pointer.deallocate() }
+    }
 
     /// Reads all entries of `path` (hidden ones included; callers filter).
     static func read(path: String) throws -> [FileItem] {
@@ -50,7 +62,11 @@ enum DirectoryReader {
 
     /// Streams entries to `body`. When `detailed` is false only the name, type
     /// and sizes are parsed (used by recursive size calculation and copying).
-    static func forEachEntry(inDirectory rawPath: String, detailed: Bool, _ body: (FileItem) throws -> Void) throws {
+    /// `include` sees each entry's name and object type (`vREG`, `vDIR`, ...)
+    /// before anything else is built; entries it rejects are skipped cheaply.
+    static func forEachEntry(inDirectory rawPath: String, detailed: Bool, buffer: Buffer? = nil,
+                             include: ((UnsafePointer<CChar>, UInt32) -> Bool)? = nil,
+                             _ body: (FileItem) throws -> Void) throws {
         let path = normalized(rawPath)
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw ReadError(path: path, code: errno) }
@@ -63,20 +79,20 @@ enum DirectoryReader {
         request.dirattr = detailed ? (dirEntryCount | dirMountStatus) : dirMountStatus
         request.fileattr = fileTotalSize | fileAllocSize
 
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 16)
-        defer { buffer.deallocate() }
+        let storage = buffer ?? Buffer()
+        defer { withExtendedLifetime(storage) {} }
 
         while true {
-            let count = getattrlistbulk(fd, &request, buffer, bufferSize, 0)
+            let count = getattrlistbulk(fd, &request, storage.pointer, storage.size, 0)
             if count < 0 {
                 if errno == EINTR { continue }
                 throw ReadError(path: path, code: errno)
             }
             if count == 0 { break }
-            var entry = UnsafeRawPointer(buffer)
+            var entry = UnsafeRawPointer(storage.pointer)
             for _ in 0..<Int(count) {
                 let length = Int(entry.loadUnaligned(as: UInt32.self))
-                if let item = parse(entry: entry, parentPath: path, detailed: detailed) {
+                if let item = parse(entry: entry, parentPath: path, detailed: detailed, include: include) {
                     try body(item)
                 }
                 entry = entry.advanced(by: length)
@@ -100,7 +116,7 @@ enum DirectoryReader {
 
     /// The fastest possible listing: name, type, size and mount status only.
     /// Used by recursive size calculation and the copy engine's tree scan.
-    static func forEachRawEntry(inDirectory rawPath: String, _ body: (RawEntry) -> Void) throws {
+    static func forEachRawEntry(inDirectory rawPath: String, buffer: Buffer? = nil, _ body: (RawEntry) -> Void) throws {
         let path = normalized(rawPath)
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw ReadError(path: path, code: errno) }
@@ -112,17 +128,17 @@ enum DirectoryReader {
         request.dirattr = dirMountStatus
         request.fileattr = fileTotalSize
 
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: 16)
-        defer { buffer.deallocate() }
+        let storage = buffer ?? Buffer()
+        defer { withExtendedLifetime(storage) {} }
 
         while true {
-            let count = getattrlistbulk(fd, &request, buffer, bufferSize, 0)
+            let count = getattrlistbulk(fd, &request, storage.pointer, storage.size, 0)
             if count < 0 {
                 if errno == EINTR { continue }
                 throw ReadError(path: path, code: errno)
             }
             if count == 0 { break }
-            var entry = UnsafeRawPointer(buffer)
+            var entry = UnsafeRawPointer(storage.pointer)
             for _ in 0..<Int(count) {
                 let length = Int(entry.loadUnaligned(as: UInt32.self))
                 var field = entry.advanced(by: 4)
@@ -163,11 +179,12 @@ enum DirectoryReader {
     }
 
     static func normalized(_ path: String) -> String {
-        if path.count > 1 && path.hasSuffix("/") { return String(path.dropLast()) }
+        if path.utf8.count > 1 && path.utf8.last == UInt8(ascii: "/") { return String(path.dropLast()) }
         return path.isEmpty ? "/" : path
     }
 
-    private static func parse(entry: UnsafeRawPointer, parentPath: String, detailed: Bool) -> FileItem? {
+    private static func parse(entry: UnsafeRawPointer, parentPath: String, detailed: Bool,
+                              include: ((UnsafePointer<CChar>, UInt32) -> Bool)?) -> FileItem? {
         var field = entry.advanced(by: MemoryLayout<UInt32>.size) // skip length
         let returned = field.loadUnaligned(as: attribute_set_t.self)
         field = field.advanced(by: MemoryLayout<attribute_set_t>.size)
@@ -179,20 +196,24 @@ enum DirectoryReader {
             if error != 0 && returned.commonattr & cmnName == 0 { return nil }
         }
 
-        var name = ""
+        var namePointer: UnsafePointer<CChar>?
         if returned.commonattr & cmnName != 0 {
             let ref = field.loadUnaligned(as: attrreference_t.self)
-            let namePointer = field.advanced(by: Int(ref.attr_dataoffset)).assumingMemoryBound(to: CChar.self)
-            name = String(cString: namePointer)
+            namePointer = field.advanced(by: Int(ref.attr_dataoffset)).assumingMemoryBound(to: CChar.self)
             field = field.advanced(by: MemoryLayout<attrreference_t>.size)
         }
-        if name.isEmpty || name == "." || name == ".." { return nil }
+        guard let namePointer else { return nil }
 
         var objType: UInt32 = 0
         if returned.commonattr & cmnObjType != 0 {
             objType = field.loadUnaligned(as: UInt32.self)
             field = field.advanced(by: 4)
         }
+        // Rejected entries cost no String, no FileItem and no stat.
+        if let include, !include(namePointer, objType) { return nil }
+        let name = String(cString: namePointer)
+        if name.isEmpty || name == "." || name == ".." { return nil }
+
         var created = 0.0
         if returned.commonattr & cmnCrTime != 0 {
             created = seconds(field.loadUnaligned(as: timespec.self))

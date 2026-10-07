@@ -8,6 +8,15 @@ enum FileKinds {
     private static var packageByExt: [String: Bool] = [:]
     private static var kindByKey: [String: String] = [:]
     private static var typeByKey: [String: UTType] = [:]
+    private static var traitsByKey: [String: Traits] = [:]
+
+    /// The type checks the views make per cell, answered once per file key.
+    private struct Traits: OptionSet {
+        let rawValue: UInt8
+        static let image = Traits(rawValue: 1)
+        static let audiovisual = Traits(rawValue: 2)
+        static let thumbnail = Traits(rawValue: 4)
+    }
 
     /// Directories that Finder presents as a single file.
     static func isPackage(name: String, finderFlags: UInt16) -> Bool {
@@ -36,7 +45,9 @@ enum FileKinds {
             return .item
         case .file, .package:
             if item.isAlias { return .aliasFile }
-            let key = (item.type == .package ? "/" : "") + item.ext
+            // Extension-less files differ by their executable bit ("//x", as in kind(for:)).
+            let executable = item.ext.isEmpty && item.type == .file && (item.mode & 0o111) != 0
+            let key = (item.type == .package ? "/" : "") + item.ext + (executable ? "//x" : "")
             lock.lock()
             if let cached = typeByKey[key] { lock.unlock(); return cached }
             lock.unlock()
@@ -67,7 +78,8 @@ enum FileKinds {
         case .file, .package:
             if item.isAlias { return "Alias" }
             let executable = item.ext.isEmpty && item.type == .file && (item.mode & 0o111) != 0
-            let key = (item.type == .package ? "/" : "") + item.ext + (executable ? "+x" : "")
+            // "//x" cannot collide with an extension: extensions never contain "/".
+            let key = (item.type == .package ? "/" : "") + item.ext + (executable ? "//x" : "")
             lock.lock()
             if let cached = kindByKey[key] { lock.unlock(); return cached }
             lock.unlock()
@@ -91,15 +103,42 @@ enum FileKinds {
         }
     }
 
-    static func isImage(_ item: FileItem) -> Bool { item.type == .file && type(for: item).conforms(to: .image) }
-    static func isMovie(_ item: FileItem) -> Bool { item.type == .file && type(for: item).conforms(to: .audiovisualContent) }
+    static func isImage(_ item: FileItem) -> Bool { item.type == .file && traits(of: item).contains(.image) }
+    static func isMovie(_ item: FileItem) -> Bool { item.type == .file && traits(of: item).contains(.audiovisual) }
 
     /// Items worth asking Quick Look for a real thumbnail.
     static func wantsThumbnail(_ item: FileItem) -> Bool {
-        guard item.type == .file, item.size > 0 else { return false }
+        item.type == .file && item.size > 0 && traits(of: item).contains(.thumbnail)
+    }
+
+    /// What `type(for:)` depends on for a plain file ("/" cannot occur in an extension).
+    private static func fileKey(_ item: FileItem) -> String {
+        if item.isAlias { return "/alias" }
+        if item.ext.isEmpty { return (item.mode & 0o111) != 0 ? "/x" : "/" }
+        return item.ext
+    }
+
+    /// Up to eight Launch Services conformance checks, made once per file key.
+    /// Only called for plain files.
+    private static func traits(of item: FileItem) -> Traits {
+        let key = fileKey(item)
+        lock.lock()
+        if let cached = traitsByKey[key] { lock.unlock(); return cached }
+        lock.unlock()
         let t = type(for: item)
-        return t.conforms(to: .image) || t.conforms(to: .movie) || t.conforms(to: .pdf)
+        var traits: Traits = []
+        if t.conforms(to: .image) { traits.insert(.image) }
+        if t.conforms(to: .audiovisualContent) { traits.insert(.audiovisual) }
+        if traits.contains(.image) || t.conforms(to: .movie) || t.conforms(to: .pdf)
             || t.conforms(to: .presentation) || t.conforms(to: .spreadsheet)
             || t.identifier == "com.apple.iwork.pages.sffpages" || t.conforms(to: .threeDContent)
+            // Audio: the cover art, or Quick Look's music tile in icon mode, like Finder.
+            || t.conforms(to: .audio) {
+            traits.insert(.thumbnail)
+        }
+        lock.lock()
+        traitsByKey[key] = traits
+        lock.unlock()
+        return traits
     }
 }

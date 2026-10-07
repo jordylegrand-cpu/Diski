@@ -38,7 +38,7 @@ enum ListColumn: String, CaseIterable {
         switch self {
         case .name: return 110
         case .modified, .created, .added: return 64
-        case .size: return 74 // "Zero bytes", "999.9 MB"
+        case .size: return 76 // "Zero bytes", "999.9 MB" inside the 4-pt label insets
         case .kind: return 64
         }
     }
@@ -77,7 +77,15 @@ protocol FileViewKeyHandling: AnyObject {
 
 final class FileOutlineView: NSOutlineView {
     weak var keyHandler: FileViewKeyHandling?
+    /// Called when a drag leaves the list (spring-loading stops).
+    var onDraggingExited: (() -> Void)?
     private var lastTypeSelect: TimeInterval = 0
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        // NSTableView clears its own drop highlight here.
+        super.draggingExited(sender)
+        onDraggingExited?()
+    }
 
     override func keyDown(with event: NSEvent) {
         let typing = ProcessInfo.processInfo.systemUptime - lastTypeSelect < 1.0
@@ -106,6 +114,9 @@ final class NameCellView: NSTableCellView {
     let loader = ItemImageLoader()
     private var iconWidth: NSLayoutConstraint!
     private var iconHeight: NSLayoutConstraint!
+    private var iconLeading: NSLayoutConstraint!
+    private var nameGap: NSLayoutConstraint!
+    private var tagGap: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -116,6 +127,8 @@ final class NameCellView: NSTableCellView {
         name.font = .systemFont(ofSize: NSFont.systemFontSize)
         name.textColor = .labelColor
         name.cell?.truncatesLastVisibleLine = true
+        // Truncated names show in full on hover, like Finder.
+        name.allowsExpansionToolTips = true
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         tags.translatesAutoresizingMaskIntoConstraints = false
         tags.setContentHuggingPriority(.required, for: .horizontal)
@@ -126,15 +139,17 @@ final class NameCellView: NSTableCellView {
         textField = name
         iconWidth = icon.widthAnchor.constraint(equalToConstant: 26)
         iconHeight = icon.heightAnchor.constraint(equalToConstant: 26)
-        // Finder's metrics: the icon 13.5 pt into the row highlight, the name
-        // 7 pt after the icon.
+        // Set per icon size in configure(_:iconSize:thumbnails:dimmed:).
+        iconLeading = icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -1.5)
+        nameGap = name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6)
+        tagGap = tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 5)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -1.5),
+            iconLeading,
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconWidth, iconHeight,
-            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            nameGap,
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
-            tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 5),
+            tagGap,
             tags.centerYAnchor.constraint(equalTo: centerYAnchor),
             tags.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
         ])
@@ -142,17 +157,29 @@ final class NameCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ item: FileItem, iconSize: CGFloat, dimmed: Bool) {
+    func configure(_ item: FileItem, iconSize: CGFloat, thumbnails: Bool, dimmed: Bool) {
         objectValue = item
-        iconWidth.constant = iconSize
-        iconHeight.constant = iconSize
-        name.stringValue = item.name
+        // A cell reused while it was being renamed.
+        if name.drawsBackground { endEditing() }
+        // Finder keeps the names at one x for every icon size (cell + 20.5,
+        // 28.5, 36.5) and moves the icon instead: its artwork starts about
+        // 16 pt from the row edge, 4 pt before the name at 16-pt icons.
+        let lead: CGFloat = iconSize <= 16 ? 0.5 : (iconSize <= 24 ? -0.5 : -1.5)
+        let gap: CGFloat = iconSize <= 16 ? 4 : (iconSize <= 24 ? 5 : 6)
+        if iconLeading.constant != lead { iconLeading.constant = lead }
+        if nameGap.constant != gap { nameGap.constant = gap }
+        if iconWidth.constant != iconSize { iconWidth.constant = iconSize }
+        if iconHeight.constant != iconSize { iconHeight.constant = iconSize }
+        name.stringValue = item.displayName
         name.isEditable = false
         name.toolTip = nil
-        loader.load(item, into: icon, points: iconSize, thumbnails: Prefs.showThumbnailsInList)
+        loader.load(item, into: icon, points: iconSize, thumbnails: thumbnails, iconMode: true)
         icon.alphaValue = (dimmed || item.isHidden) ? 0.5 : 1
         let label = item.labelIndex
         tags.colors = label > 0 ? [TagColors.color(forLabel: label)] : []
+        // Without a tag dot the spacer would only cut the name short.
+        let tagSpace: CGFloat = label > 0 ? 5 : 0
+        if tagGap.constant != tagSpace { tagGap.constant = tagSpace }
     }
 
     func beginEditing(delegate: NSTextFieldDelegate) {
@@ -160,6 +187,12 @@ final class NameCellView: NSTableCellView {
         name.isEditable = true
         name.isSelectable = true
         name.delegate = delegate
+        // Finder's rename field: a text-background field with the native focus
+        // ring, readable over the accent-colored selection; long names scroll.
+        name.drawsBackground = true
+        name.backgroundColor = .textBackgroundColor
+        name.textColor = .textColor
+        name.cell?.isScrollable = true
         name.lineBreakMode = .byClipping
         window.makeFirstResponder(name)
         if let editor = name.currentEditor() {
@@ -170,6 +203,9 @@ final class NameCellView: NSTableCellView {
     func endEditing() {
         name.isEditable = false
         name.isSelectable = false
+        name.drawsBackground = false
+        name.textColor = .labelColor
+        name.cell?.isScrollable = false
         name.lineBreakMode = .byTruncatingMiddle
     }
 
@@ -208,6 +244,37 @@ final class IndentedHeaderCell: NSTableHeaderCell {
     }
 }
 
+/// The native header without the separators at its two outer edges: Finder
+/// only draws them between columns. Everything else (the bottom hairline, the
+/// separators between columns, titles and chevrons) is AppKit's own drawing.
+final class ListHeaderView: NSTableHeaderView {
+    override func draw(_ dirtyRect: NSRect) {
+        guard let table = tableView, bounds.height > 3,
+              let first = table.tableColumns.firstIndex(where: { !$0.isHidden }),
+              let last = table.tableColumns.lastIndex(where: { !$0.isHidden }) else {
+            super.draw(dirtyRect)
+            return
+        }
+        // Native separators sit in the 1-pt band ending at a column edge
+        // (list.jpg: view x 9..10 and 579..580). The strips stop above the
+        // bottom hairline and snap outward to whole pixels, so the clip edge
+        // never anti-aliases into a faint seam.
+        let leading = headerRect(ofColumn: first).minX
+        let trailing = headerRect(ofColumn: last).maxX
+        let strip = NSRect(x: 0, y: isFlipped ? bounds.minY : bounds.minY + 3, width: 2, height: bounds.height - 3)
+        let mask = NSBezierPath(rect: bounds)
+        mask.append(NSBezierPath(rect: backingAlignedRect(strip.offsetBy(dx: leading - 1.5, dy: 0),
+                                                          options: .alignAllEdgesOutward)))
+        mask.append(NSBezierPath(rect: backingAlignedRect(strip.offsetBy(dx: trailing - 1.5, dy: 0),
+                                                          options: .alignAllEdgesOutward)))
+        mask.windingRule = .evenOdd
+        NSGraphicsContext.saveGraphicsState()
+        mask.addClip()
+        super.draw(dirtyRect)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
 final class TextCellView: NSTableCellView {
     let label = NSTextField(labelWithString: "")
 
@@ -217,17 +284,46 @@ final class TextCellView: NSTableCellView {
         label.font = .systemFont(ofSize: NSFont.systemFontSize)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
+        label.allowsExpansionToolTips = true
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(label)
         textField = label
+        // Finder: text 9 pt after a column separator (3 pt of intercell
+        // spacing, 4 pt here, 2 pt of text inset), 8 pt before the next.
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Drags show only the icon and the name, like Finder.
+    override var draggingImageComponents: [NSDraggingImageComponent] { [] }
+}
+
+private extension RowDensity {
+    /// Finder on macOS 27: 20-pt rows with 16-pt icons (18 + 2 pt between
+    /// rows); 33.5-pt rows with 32-pt icons.
+    var listRowHeight: CGFloat {
+        switch self {
+        case .compact: return 18
+        case .regular: return 26
+        case .comfortable: return 31.5
+        }
+    }
+
+    /// Finder's Name title starts 43-46 pt from the row edge whatever the
+    /// icon size. IndentedHeaderCell applies the indent twice (frame and
+    /// title rect), so these are calibrated to it.
+    var nameHeaderIndent: CGFloat {
+        switch self {
+        case .compact: return 26.5
+        case .regular: return 25.5
+        case .comfortable: return 24.5
+        }
+    }
 }
 
 // MARK: - List view
@@ -248,11 +344,32 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     /// Flat search results: no disclosure triangles.
     var isFlat = false
 
+    /// The settings the rows are configured with. Prefs.didChange fires for
+    /// every preference, most of which do not concern the list, and cells
+    /// read these while scrolling instead of UserDefaults.
+    private struct ListAppearance: Equatable {
+        var density: RowDensity
+        var thumbnails: Bool
+        var folderSizes: Bool
+        var columns: Set<String>
+    }
+
+    private static func currentAppearance() -> ListAppearance {
+        ListAppearance(density: Prefs.rowDensity, thumbnails: Prefs.showThumbnailsInList,
+                       folderSizes: Prefs.calculateFolderSizes, columns: Set(Prefs.listColumns))
+    }
+
+    private var listAppearance = ListViewController.currentAppearance()
+
     private static let nameCellID = NSUserInterfaceItemIdentifier("NameCell")
-    private static let textCellID = NSUserInterfaceItemIdentifier("TextCell")
+    /// One reuse queue per column, so reused cells keep their alignment and
+    /// truncation and only their text changes.
+    private static let textCellIDs: [ListColumn: NSUserInterfaceItemIdentifier] =
+        Dictionary(uniqueKeysWithValues: ListColumn.allCases.map { ($0, NSUserInterfaceItemIdentifier("TextCell." + $0.rawValue)) })
 
     override func loadView() {
-        let density = Prefs.rowDensity
+        listAppearance = Self.currentAppearance()
+        let density = listAppearance.density
         outlineView.style = .inset
         outlineView.usesAlternatingRowBackgroundColors = true
         outlineView.allowsMultipleSelection = true
@@ -264,7 +381,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         outlineView.indentationPerLevel = 14
         outlineView.autoresizesOutlineColumn = false
         outlineView.rowSizeStyle = .custom
-        outlineView.rowHeight = density.rowHeight
+        outlineView.rowHeight = density.listRowHeight
         outlineView.intercellSpacing = NSSize(width: 6, height: 2)
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -275,11 +392,23 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         outlineView.setDraggingSourceOperationMask([.copy, .move, .link, .generic], forLocal: true)
         outlineView.registerForDraggedTypes(PaneViewController.acceptedDragTypes)
         outlineView.draggingDestinationFeedbackStyle = .regular
+        outlineView.onDraggingExited = { [weak self] in
+            guard let self else { return }
+            self.springWork?.cancel()
+            self.springTarget = nil
+            if self.outlineView.draggingDestinationFeedbackStyle != .regular {
+                self.outlineView.draggingDestinationFeedbackStyle = .regular
+            }
+        }
 
         contextMenu.delegate = self
         outlineView.menu = contextMenu
         headerMenu.delegate = self
 
+        // Same native header, minus the separators at its outer edges.
+        if let native = outlineView.headerView {
+            outlineView.headerView = ListHeaderView(frame: native.frame)
+        }
         buildColumns()
         outlineView.autosaveName = "DiskiListColumns"
         outlineView.autosaveTableColumns = true
@@ -344,7 +473,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
         // Names stay readable (a dozen characters next to the icon) before
         // any other column is kept.
-        let nameFloor = max(name.minWidth, 120 + Prefs.rowDensity.iconSize)
+        let nameFloor = max(name.minWidth, 120 + listAppearance.density.iconSize)
         var shown = others
         while let leastImportant = shown.min(by: { importance(of: $0) < importance(of: $1) }),
               nameFloor + shown.reduce(0, { $0 + $1.minWidth }) > room(for: shown.count) {
@@ -427,7 +556,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
                 let widest = samples.map { sample in
                     (Formatters.listDate(sample, length: length) as NSString).size(withAttributes: [.font: font]).width
                 }.max() ?? 0
-                return ceil(widest) + 10
+                // 4-pt label insets and 2-pt text insets on both sides.
+                return ceil(widest) + 12
             }
         }
         var best = Formatters.DateLength.dateOnly
@@ -443,10 +573,14 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         guard dateLengths[kind.rawValue] != length else { return }
         dateLengths[kind.rawValue] = length
         let index = outlineView.column(withIdentifier: column.identifier)
-        let rows = outlineView.rows(in: outlineView.visibleRect)
-        guard index >= 0, rows.length > 0 else { return }
-        outlineView.reloadData(forRowIndexes: IndexSet(integersIn: rows.location..<NSMaxRange(rows)),
-                               columnIndexes: IndexSet(integer: index))
+        // Every row that has a view, including the ones prepared off screen
+        // for responsive scrolling, so none keeps the old format.
+        var rows = IndexSet()
+        outlineView.enumerateAvailableRowViews { _, row in
+            if row >= 0 { rows.insert(row) }
+        }
+        guard index >= 0, !rows.isEmpty else { return }
+        outlineView.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: index))
     }
 
     private func makeTableColumn(_ column: ListColumn) -> NSTableColumn {
@@ -459,11 +593,15 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
             // Finder starts the Name title over the end of the icons.
             let header = IndentedHeaderCell(textCell: column.title)
             header.font = tableColumn.headerCell.font
-            header.indent = Prefs.rowDensity.iconSize - 7.5
+            header.lineBreakMode = tableColumn.headerCell.lineBreakMode
+            header.indent = listAppearance.density.nameHeaderIndent
             tableColumn.headerCell = header
         }
         // Finder left-aligns every title, even over right-aligned sizes.
         tableColumn.headerCell.alignment = .left
+        // Finder titles unsorted columns in secondary gray; syncSortIndicator
+        // gives the sorted one the label color.
+        tableColumn.headerCell.textColor = .secondaryLabelColor
         tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.sortKey.rawValue,
                                                                ascending: column.sortKey.defaultAscending)
         // Name always fills the row: widen it by narrowing the other columns.
@@ -481,16 +619,34 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
             if column == .name { outlineView.outlineTableColumn = tableColumn }
         }
         outlineView.headerView?.menu = headerMenu
-        syncSortIndicator()
+        // New columns need their chevron and title color.
+        syncSortIndicator(force: true)
         fittedWidth = 0
         if isViewLoaded { view.needsLayout = true }
     }
 
-    func syncSortIndicator() {
+    /// Shows the pane's sort in the header. Only touches the table when the
+    /// sort changed (or `force`, for columns that were just added).
+    func syncSortIndicator(force: Bool = false) {
         guard let options = pane?.arrangeOptions else { return }
-        isApplyingSort = true
-        outlineView.sortDescriptors = [NSSortDescriptor(key: options.sortKey.rawValue, ascending: options.ascending)]
-        isApplyingSort = false
+        let current = outlineView.sortDescriptors
+        if force || current.count != 1 || current.first?.key != options.sortKey.rawValue
+            || current.first?.ascending != options.ascending {
+            isApplyingSort = true
+            outlineView.sortDescriptors = [NSSortDescriptor(key: options.sortKey.rawValue, ascending: options.ascending)]
+            isApplyingSort = false
+        }
+        // Like Finder, the sorted title in the label color, the others gray.
+        let sortedID = ListColumn(sortKey: options.sortKey)?.rawValue
+        var changed = false
+        for column in outlineView.tableColumns {
+            let color: NSColor = column.identifier.rawValue == sortedID ? .labelColor : .secondaryLabelColor
+            if column.headerCell.textColor != color {
+                column.headerCell.textColor = color
+                changed = true
+            }
+        }
+        if changed { outlineView.headerView?.needsDisplay = true }
     }
 
     // MARK: Display
@@ -498,6 +654,11 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     override func itemsDidChange(from previous: [FileItem], changes: DirectoryStore.Changes?, reset: Bool) {
         guard isViewLoaded else { return }
         if reset {
+            if renamingItem != nil {
+                // Leaving the folder commits the rename, like Finder.
+                view.window?.makeFirstResponder(outlineView)
+                if renamingItem != nil { cancelRename() }
+            }
             collapseAllWatching()
             sizeRequests.removeAll()
             outlineView.reloadData()
@@ -507,17 +668,43 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         }
         if let changes, !changes.isInitialLoad {
             applyDiff(old: previous, new: items, parent: nil)
-            for item in changes.updated where outlineView.row(forItem: item) >= 0 {
+            for item in changes.updated where item !== renamingItem && outlineView.row(forItem: item) >= 0 {
                 outlineView.reloadItem(item, reloadChildren: false)
             }
             return
         }
+        // Re-sorted or re-filtered without moving a row (sizes streaming in
+        // while sorted by size, mostly): only expanded folders can change.
+        if previous.count == items.count && zip(previous, items).allSatisfy({ $0 === $1 }) {
+            syncSortIndicator()
+            rearrangeExpandedFolders()
+            return
+        }
         // Re-sorted or re-filtered: rebuild everything, keep selection and expansion.
+        if renamingItem != nil { cancelRename() }
         let selection = selectedItems
         childCache.removeAll()
         outlineView.reloadData()
         select(selection, scroll: false)
         syncSortIndicator()
+    }
+
+    /// Re-arranges expanded folders from their listings (not from the cache,
+    /// which is already filtered) and reloads only the ones that changed.
+    private func rearrangeExpandedFolders() {
+        // Children cached for folders that are not expanded would go stale.
+        childCache = childCache.filter { expanded[$0.key] != nil }
+        guard let pane else { return }
+        for (path, folder) in expanded {
+            guard let old = childCache[path] else { continue }
+            let listing = DirectoryStore.shared.listing(for: path)
+            guard listing.isLoaded else { continue }
+            let new = pane.arrange(listing.items)
+            if new.count == old.count && zip(old, new).allSatisfy({ $0 === $1 }) { continue }
+            childCache[path] = new
+            if let renaming = renamingItem, renaming.path.hasPrefix(path + "/") { cancelRename() }
+            outlineView.reloadItem(folder, reloadChildren: true)
+        }
     }
 
     private func collapseAllWatching() {
@@ -527,11 +714,29 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     }
 
     private func applyDiff(old: [FileItem], new: [FileItem], parent: FileItem?) {
+        // FileItem's == and hash are identity, so these compare identity.
+        let oldSet = Set(old), newSet = Set(new)
+        let orderKept = old.lazy.filter { newSet.contains($0) }.elementsEqual(new.lazy.filter { oldSet.contains($0) })
+        if orderKept {
+            // The rows that stay kept their order, so the difference is just
+            // what left and what came: O(n), and the same as Myers' result.
+            let removed = IndexSet(old.indices.filter { !newSet.contains(old[$0]) })
+            let inserted = IndexSet(new.indices.filter { !oldSet.contains(new[$0]) })
+            if removed.count + inserted.count > 400 {
+                reloadRows(in: parent)
+            } else {
+                animateRows(removed: removed, inserted: inserted, in: parent)
+            }
+            return
+        }
+        // Rows moved. Myers is O(n·d): too slow on the main thread for big lists.
+        if old.count + new.count > 2000 {
+            reloadRows(in: parent)
+            return
+        }
         let difference = new.difference(from: old)
         if difference.count > 400 {
-            let selection = selectedItems
-            outlineView.reloadItem(parent, reloadChildren: true)
-            select(selection, scroll: false)
+            reloadRows(in: parent)
             return
         }
         var removed = IndexSet()
@@ -542,6 +747,18 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
             case let .insert(offset, _, _): inserted.insert(offset)
             }
         }
+        animateRows(removed: removed, inserted: inserted, in: parent)
+    }
+
+    /// Too many changes to animate: reloads `parent`'s rows, keeping the selection.
+    private func reloadRows(in parent: FileItem?) {
+        if renamingItem != nil { cancelRename() }
+        let selection = selectedItems
+        outlineView.reloadItem(parent, reloadChildren: true)
+        select(selection, scroll: false)
+    }
+
+    private func animateRows(removed: IndexSet, inserted: IndexSet, in parent: FileItem?) {
         guard !removed.isEmpty || !inserted.isEmpty else { return }
         outlineView.beginUpdates()
         if !removed.isEmpty { outlineView.removeItems(at: removed, inParent: parent, withAnimation: .effectFade) }
@@ -559,7 +776,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         childCache[listing.path] = new
         applyDiff(old: old, new: new, parent: folder)
         if let changes = notification.userInfo?["changes"] as? DirectoryStore.Changes {
-            for item in changes.updated where outlineView.row(forItem: item) >= 0 {
+            for item in changes.updated where item !== renamingItem && outlineView.row(forItem: item) >= 0 {
                 outlineView.reloadItem(item, reloadChildren: false)
             }
         }
@@ -567,7 +784,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
     private func children(of folder: FileItem) -> [FileItem] {
         if let cached = childCache[folder.path] { return cached }
-        let listing = DirectoryStore.shared.loadNow(folder.path)
+        // A slow folder opens empty; directoryDidUpdate inserts its rows when they arrive.
+        let listing = DirectoryStore.shared.load(folder.path, waitingUpTo: 0.05)
         let arranged = pane?.arrange(listing.items) ?? listing.items
         childCache[folder.path] = arranged
         return arranged
@@ -618,15 +836,22 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         if column == .name {
             let cell = outlineView.makeView(withIdentifier: Self.nameCellID, owner: self) as? NameCellView
                 ?? { let c = NameCellView(); c.identifier = Self.nameCellID; return c }()
-            cell.configure(item, iconSize: Prefs.rowDensity.iconSize, dimmed: pane?.isCut(item) ?? false)
+            cell.configure(item, iconSize: listAppearance.density.iconSize, thumbnails: listAppearance.thumbnails,
+                           dimmed: pane?.isCut(item) ?? false)
             if pane?.isSearchResults == true { cell.name.toolTip = item.path }
             return cell
         }
-        let cell = outlineView.makeView(withIdentifier: Self.textCellID, owner: self) as? TextCellView
-            ?? { let c = TextCellView(); c.identifier = Self.textCellID; return c }()
-        cell.label.alignment = column.alignment
-        // Like Finder, long kinds keep both ends ("Icon Comp… Icon").
-        cell.label.lineBreakMode = column == .kind ? .byTruncatingMiddle : .byTruncatingTail
+        let identifier = Self.textCellIDs[column] ?? NSUserInterfaceItemIdentifier("TextCell." + column.rawValue)
+        let cell: TextCellView
+        if let reused = outlineView.makeView(withIdentifier: identifier, owner: self) as? TextCellView {
+            cell = reused
+        } else {
+            cell = TextCellView()
+            cell.identifier = identifier
+            cell.label.alignment = column.alignment
+            // Like Finder, long kinds keep both ends ("Icon Comp… Icon").
+            cell.label.lineBreakMode = column == .kind ? .byTruncatingMiddle : .byTruncatingTail
+        }
         cell.label.stringValue = text(for: item, column: column)
         return cell
     }
@@ -634,7 +859,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     private func text(for item: FileItem, column: ListColumn) -> String {
         let length = dateLengths[column.rawValue] ?? .short
         switch column {
-        case .name: return item.name
+        case .name: return item.displayName
         case .modified: return Formatters.listDate(item.modified, length: length)
         case .created: return Formatters.listDate(item.created, length: length)
         case .added: return item.added > 0 ? Formatters.listDate(item.added, length: length) : "--"
@@ -655,7 +880,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     /// Starts (or joins) a size calculation. `refreshing` re-requests a size the
     /// item already shows because its contents changed.
     private func requestSize(for item: FileItem, refreshing: Bool = false) {
-        guard Prefs.calculateFolderSizes, !isFlat || item.type == .package else { return }
+        guard listAppearance.folderSizes, !isFlat || item.type == .package else { return }
         let path = item.path
         if let cached = FolderSizer.shared.cached(path) {
             let changed = cached.bytes != item.computedFolderSize
@@ -682,7 +907,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     private var sizeRefreshScheduled = false
 
     @objc private func folderContentsDidChange(_ notification: Notification) {
-        guard Prefs.calculateFolderSizes, isViewLoaded,
+        guard listAppearance.folderSizes, isViewLoaded,
               let paths = notification.userInfo?["paths"] as? Set<String> else { return }
         pendingSizeRefresh.formUnion(paths)
         guard !sizeRefreshScheduled else { return }
@@ -724,7 +949,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
 
     func outlineView(_ outlineView: NSOutlineView, typeSelectStringFor tableColumn: NSTableColumn?, item: Any) -> String? {
         guard tableColumn?.identifier.rawValue == ListColumn.name.rawValue else { return nil }
-        return (item as? FileItem)?.name
+        return (item as? FileItem)?.displayName
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -735,6 +960,11 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         guard !isApplyingSort, let descriptor = outlineView.sortDescriptors.first,
               let key = descriptor.key, let sortKey = SortKey(rawValue: key) else { return }
         pane?.setSort(sortKey, ascending: descriptor.ascending)
+    }
+
+    /// Like Finder, Name stays the first column.
+    func outlineView(_ outlineView: NSOutlineView, shouldReorderColumn columnIndex: Int, toColumn newColumnIndex: Int) -> Bool {
+        columnIndex > 0 && newColumnIndex > 0
     }
 
     // MARK: Selection API
@@ -761,23 +991,36 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     }
 
     override func refresh(_ items: [FileItem]) {
-        for item in items where outlineView.row(forItem: item) >= 0 {
+        // The row being renamed keeps its field (and the typed name).
+        for item in items where item !== renamingItem && outlineView.row(forItem: item) >= 0 {
             outlineView.reloadItem(item, reloadChildren: false)
         }
     }
 
     override func appearanceSettingsDidChange() {
-        outlineView.rowHeight = Prefs.rowDensity.rowHeight
-        if let header = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue))?
-            .headerCell as? IndentedHeaderCell, header.indent != Prefs.rowDensity.iconSize - 7.5 {
-            header.indent = Prefs.rowDensity.iconSize - 7.5
-            outlineView.headerView?.needsDisplay = true
+        // Called for every preference: only the list's own settings reload it.
+        let current = Self.currentAppearance()
+        guard current != listAppearance else { return }
+        let old = listAppearance
+        listAppearance = current
+        if old.density != current.density {
+            let height = current.density.listRowHeight
+            if outlineView.rowHeight != height { outlineView.rowHeight = height }
+            if let header = outlineView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue))?
+                .headerCell as? IndentedHeaderCell, header.indent != current.density.nameHeaderIndent {
+                header.indent = current.density.nameHeaderIndent
+                outlineView.headerView?.needsDisplay = true
+            }
         }
-        let current = outlineView.tableColumns.compactMap { ListColumn(rawValue: $0.identifier.rawValue) }.filter { $0 != .name }
+        // toggleColumn has already added or removed its column: rebuilding then
+        // would lose the order the user dragged the columns into.
+        let shown = outlineView.tableColumns.compactMap { ListColumn(rawValue: $0.identifier.rawValue) }.filter { $0 != .name }
         let wanted = Prefs.listColumns.compactMap { ListColumn(rawValue: $0) }
-        if Set(current) != Set(wanted) {
+        if Set(shown) != Set(wanted) {
             buildColumns()
         }
+        // Density, previews, folder sizes or columns changed: every row shows them.
+        if renamingItem != nil { cancelRename() }
         let selection = selectedItems
         outlineView.reloadData()
         select(selection, scroll: false)
@@ -815,6 +1058,7 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         guard column >= 0,
               let cell = outlineView.view(atColumn: column, row: row, makeIfNecessary: true) as? NameCellView else { return }
         renamingItem = item
+        cell.name.stringValue = item.name   // the full name while editing, ".app" included
         cell.beginEditing(delegate: self)
     }
 
@@ -824,22 +1068,43 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let newName = field.stringValue
         (field.superview as? NameCellView)?.endEditing()
         view.window?.makeFirstResponder(outlineView)
-        if newName != item.name {
-            if pane?.commitRename(item, to: newName) != true { field.stringValue = item.name }
+        if newName == item.name || pane?.commitRename(item, to: newName) != true {
+            field.stringValue = item.displayName
         }
     }
 
+    /// The rename field grows with the name while typing, like Finder's.
+    func controlTextDidChange(_ obj: Notification) {
+        (obj.object as? NSTextField)?.invalidateIntrinsicContentSize()
+    }
+
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)), let item = renamingItem,
-           let field = control as? NSTextField {
-            renamingItem = nil
-            field.abortEditing()
-            field.stringValue = item.name
-            (field.superview as? NameCellView)?.endEditing()
-            view.window?.makeFirstResponder(outlineView)
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)), renamingItem != nil {
+            cancelRename(field: control as? NSTextField)
             return true
         }
         return false
+    }
+
+    /// Ends a rename without applying it: Escape, or a reload that would
+    /// replace the field (which ends editing without telling the delegate).
+    private func cancelRename(field: NSTextField? = nil) {
+        guard let item = renamingItem else { return }
+        renamingItem = nil
+        var cell = field?.superview as? NameCellView
+        if cell == nil {
+            let row = outlineView.row(forItem: item)
+            let column = outlineView.column(withIdentifier: NSUserInterfaceItemIdentifier(ListColumn.name.rawValue))
+            if row >= 0, column >= 0 {
+                cell = outlineView.view(atColumn: column, row: row, makeIfNecessary: false) as? NameCellView
+            }
+        }
+        if let cell {
+            cell.name.abortEditing()
+            cell.name.stringValue = item.displayName
+            cell.endEditing()
+        }
+        view.window?.makeFirstResponder(outlineView)
     }
 
     // MARK: Menus
@@ -886,6 +1151,8 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         } else {
             columns.append(raw)
             outlineView.addTableColumn(makeTableColumn(column))
+            // Its chevron, if it is the sorted column, and its title color.
+            syncSortIndicator(force: true)
         }
         Prefs.listColumns = columns
         fittedWidth = 0
@@ -922,6 +1189,12 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
         let destination = target?.path ?? directoryPath
         let operation = pane.dragOperation(for: info, destination: destination)
         if operation.isEmpty { return [] }
+        // Like Finder, a drop into the folder being shown draws no ring around
+        // the whole list; folder rows keep the native drop highlight.
+        let feedback: NSTableView.DraggingDestinationFeedbackStyle = target == nil ? .none : .regular
+        if outlineView.draggingDestinationFeedbackStyle != feedback {
+            outlineView.draggingDestinationFeedbackStyle = feedback
+        }
         outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
         springLoad(target)
         return operation
@@ -949,6 +1222,9 @@ final class ListViewController: FileViewController, NSOutlineViewDataSource, NSO
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
         springWork?.cancel()
         springTarget = nil
+        if outlineView.draggingDestinationFeedbackStyle != .regular {
+            outlineView.draggingDestinationFeedbackStyle = .regular
+        }
         let destination = (item as? FileItem)?.path ?? directoryPath
         return pane?.performDrop(info, destination: destination) ?? false
     }

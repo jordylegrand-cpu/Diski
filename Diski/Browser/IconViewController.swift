@@ -41,7 +41,23 @@ final class FileCollectionView: NSCollectionView {
 /// underscore or dot when possible, and the second line shortened in the
 /// middle so the end of the name (its extension) stays visible.
 enum IconLabelLayout {
+    /// Laid-out names by font size, width and name: cells are configured on
+    /// every reload and scroll, and a layout costs several text measurements.
+    private static let cache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 4000
+        return cache
+    }()
+
     static func text(for name: String, font: NSFont, width: CGFloat) -> String {
+        let key = "\(font.fontName)|\(font.pointSize)|\(width)|\(name)" as NSString
+        if let cached = cache.object(forKey: key) { return cached as String }
+        let result = layout(name, font: font, width: width)
+        cache.setObject(result as NSString, forKey: key)
+        return result
+    }
+
+    private static func layout(_ name: String, font: NSFont, width: CGFloat) -> String {
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         func measure(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: attributes).width }
         guard width > 20, measure(name) > width else { return name }
@@ -65,19 +81,32 @@ enum IconLabelLayout {
         return first + "\n" + truncatingMiddle(rest, width: width, measure: measure)
     }
 
+    /// Like Finder: both halves get the same width, and no space is kept next
+    /// to the ellipsis.
     private static func truncatingMiddle(_ text: String, width: CGFloat, measure: (String) -> CGFloat) -> String {
         guard measure(text) > width else { return text }
         let characters = Array(text)
-        // Keep as much as fits, a little more of the end than the start.
-        var keep = characters.count - 1
-        while keep > 1 {
-            let tail = (keep + 1) / 2 + (keep > 6 ? 1 : 0)
-            let head = max(1, keep - tail)
-            let candidate = String(characters[0..<head]) + "…" + String(characters[(characters.count - min(tail, characters.count - head))...])
-            if measure(candidate) <= width { return candidate }
-            keep -= 1
+        let ellipsis = "…"
+        let half = (width - measure(ellipsis)) / 2
+        // The longest start that fits in half the width.
+        var low = 0, high = characters.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if measure(String(characters[0..<mid])) <= half { low = mid } else { high = mid - 1 }
         }
-        return "…"
+        var head = characters[0..<low]
+        while let last = head.last, last.isWhitespace { head = head.dropLast() }
+        let start = String(head) + ellipsis
+        // The longest end that fits in the rest.
+        let room = width - measure(start)
+        var tailLow = 0, tailHigh = characters.count - low
+        while tailLow < tailHigh {
+            let mid = (tailLow + tailHigh + 1) / 2
+            if measure(String(characters[(characters.count - mid)...])) <= room { tailLow = mid } else { tailHigh = mid - 1 }
+        }
+        var tail = characters[(characters.count - tailLow)...]
+        while let first = tail.first, first.isWhitespace { tail = tail.dropFirst() }
+        return start + String(tail)
     }
 }
 
@@ -89,6 +118,9 @@ final class IconItemView: NSView {
     let nameBackground = NSView()
     weak var item: IconViewItem?
     private var iconSize: NSLayoutConstraint!
+    private var showsSelection = false
+    private var showsEmphasis = false
+    private var showsDropTarget = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -100,7 +132,7 @@ final class IconItemView: NSView {
         iconBackground.layer?.cornerRadius = 8
         iconBackground.layer?.cornerCurve = .continuous
         nameBackground.wantsLayer = true
-        nameBackground.layer?.cornerRadius = 5
+        nameBackground.layer?.cornerRadius = 4
         nameBackground.layer?.cornerCurve = .continuous
         icon.imageScaling = .scaleProportionallyUpOrDown
         name.alignment = .center
@@ -124,10 +156,12 @@ final class IconItemView: NSView {
             name.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 2),
             name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
             name.centerXAnchor.constraint(equalTo: centerXAnchor),
-            nameBackground.leadingAnchor.constraint(equalTo: name.leadingAnchor, constant: -4),
-            nameBackground.trailingAnchor.constraint(equalTo: name.trailingAnchor, constant: 4),
-            nameBackground.topAnchor.constraint(equalTo: name.topAnchor, constant: -1),
-            nameBackground.bottomAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+            // Finder's pill hugs the name: the label's own 2 pt inset is the
+            // padding, and it stays clear of the icon box.
+            nameBackground.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            nameBackground.trailingAnchor.constraint(equalTo: name.trailingAnchor),
+            nameBackground.topAnchor.constraint(equalTo: name.topAnchor),
+            nameBackground.bottomAnchor.constraint(equalTo: name.bottomAnchor),
         ])
     }
 
@@ -139,10 +173,13 @@ final class IconItemView: NSView {
 
     /// Shows `fullName` laid out like Finder for an item `itemWidth` wide.
     func setName(_ fullName: String, itemWidth: CGFloat) {
-        name.lineBreakMode = .byClipping
-        name.cell?.wraps = false
+        // Only editing makes the field wrap.
+        if name.cell?.wraps == true {
+            name.lineBreakMode = .byClipping
+            name.cell?.wraps = false
+        }
         name.stringValue = IconLabelLayout.text(for: fullName, font: name.font ?? .systemFont(ofSize: 12),
-                                                width: max(40, itemWidth - 10))
+                                                width: max(40, itemWidth - 12))
     }
 
     /// The full name in an editable, wrapping field.
@@ -152,11 +189,29 @@ final class IconItemView: NSView {
         name.stringValue = fullName
     }
 
-    func applySelection(_ selected: Bool, emphasized: Bool) {
-        iconBackground.layer?.backgroundColor = selected ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor
-        let accent = emphasized ? NSColor.controlAccentColor : NSColor.unemphasizedSelectedContentBackgroundColor
-        nameBackground.layer?.backgroundColor = selected ? accent.cgColor : NSColor.clear.cgColor
-        name.textColor = selected && emphasized ? .white : .labelColor
+    func applySelection(_ selected: Bool, emphasized: Bool, dropTarget: Bool = false) {
+        showsSelection = selected
+        showsEmphasis = emphasized
+        showsDropTarget = dropTarget
+        applyColors()
+    }
+
+    /// Layer colors are resolved in the view's own appearance, and again when it changes.
+    private func applyColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let box: NSColor? = self.showsDropTarget ? NSColor.controlAccentColor.withAlphaComponent(0.25)
+                : (self.showsSelection ? NSColor.quaternaryLabelColor : nil)
+            self.iconBackground.layer?.backgroundColor = box?.cgColor
+            // The same blue as the list's selection, like Finder.
+            let fill = self.showsEmphasis ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor
+            self.nameBackground.layer?.backgroundColor = self.showsSelection ? fill.cgColor : nil
+        }
+        name.textColor = showsSelection && showsEmphasis ? .alternateSelectedControlTextColor : .labelColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -184,9 +239,10 @@ final class IconViewItem: NSCollectionViewItem {
     func configure(_ file: FileItem, iconSize: CGFloat, itemWidth: CGFloat, dimmed: Bool) {
         self.file = file
         itemView.setIconSize(iconSize)
-        itemView.setName(file.name, itemWidth: itemWidth)
+        itemView.setName(file.displayName, itemWidth: itemWidth)
         itemView.name.isEditable = false
-        loader.load(file, into: itemView.icon, points: iconSize, thumbnails: true)
+        // Finder's icon-view thumbnails: Quick Look's rounded, inset, shadowed style; music tiles for audio.
+        loader.load(file, into: itemView.icon, points: iconSize, thumbnails: true, iconMode: true)
         itemView.icon.alphaValue = (dimmed || file.isHidden) ? 0.5 : 1
         updateSelectionAppearance()
     }
@@ -196,16 +252,14 @@ final class IconViewItem: NSCollectionViewItem {
     }
 
     override var highlightState: NSCollectionViewItem.HighlightState {
-        didSet {
-            itemView.iconBackground.layer?.backgroundColor = highlightState == .asDropTarget
-                ? NSColor.controlAccentColor.withAlphaComponent(0.25).cgColor
-                : (isSelected ? NSColor.quaternaryLabelColor.cgColor : NSColor.clear.cgColor)
-        }
+        didSet { updateSelectionAppearance() }
     }
 
     func updateSelectionAppearance() {
         let emphasized = view.window?.isKeyWindow == true && view.window?.firstResponder === collectionView
-        itemView.applySelection(isSelected, emphasized: emphasized)
+        // Live while rubber-band selecting, like Finder.
+        let shown = highlightState == .forSelection || (isSelected && highlightState != .forDeselection)
+        itemView.applySelection(shown, emphasized: emphasized, dropTarget: highlightState == .asDropTarget)
     }
 
     func openFromDoubleClick() {
@@ -220,14 +274,20 @@ final class IconViewItem: NSCollectionViewItem {
     }
 }
 
-final class IconViewController: FileViewController, NSCollectionViewDataSource, NSCollectionViewDelegate,
+/// Finder's icon view shows no insertion line between icons.
+final class IconGapIndicator: NSView, NSCollectionViewElement {}
+
+final class IconViewController: FileViewController, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout,
                                 NSMenuDelegate, NSTextFieldDelegate, FileViewKeyHandling {
+    static let gapIdentifier = NSUserInterfaceItemIdentifier("IconGap")
     let collectionView = FileCollectionView()
     private let scrollView = NSScrollView()
     private let layout = NSCollectionViewFlowLayout()
     private let contextMenu = NSMenu()
     private var renamingItem: FileItem?
     private var draggedItems: [FileItem] = []
+    /// Whole points: the size slider is continuous.
+    private var iconSize: CGFloat = 64
 
     override func loadView() {
         configureLayout()
@@ -242,6 +302,8 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         collectionView.onTypeSelect = { [weak self] text in self?.typeSelect(text) }
         collectionView.onFocusChange = { [weak self] in self?.refreshSelectionAppearance() }
         collectionView.register(IconViewItem.self, forItemWithIdentifier: IconViewItem.identifier)
+        collectionView.register(IconGapIndicator.self, forSupplementaryViewOfKind: NSCollectionView.elementKindInterItemGapIndicator,
+                                withIdentifier: IconViewController.gapIdentifier)
         collectionView.setDraggingSourceOperationMask([.copy, .move, .link, .generic, .delete], forLocal: false)
         collectionView.setDraggingSourceOperationMask([.copy, .move, .link, .generic], forLocal: true)
         collectionView.registerForDraggedTypes(PaneViewController.acceptedDragTypes)
@@ -256,8 +318,8 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         view = scrollView
 
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didBecomeKeyNotification, object: nil)
-        center.addObserver(self, selector: #selector(windowKeyChanged), name: NSWindow.didResignKeyNotification, object: nil)
+        center.addObserver(self, selector: #selector(windowKeyChanged(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
+        center.addObserver(self, selector: #selector(windowKeyChanged(_:)), name: NSWindow.didResignKeyNotification, object: nil)
     }
 
     deinit {
@@ -265,14 +327,28 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
     }
 
     private func configureLayout() {
-        let size = Prefs.iconSize
-        layout.itemSize = NSSize(width: max(size + 56, 120), height: size + 50)
-        layout.minimumInteritemSpacing = 6
-        layout.minimumLineSpacing = 10
-        layout.sectionInset = NSEdgeInsets(top: 14, left: 16, bottom: 20, right: 16)
+        iconSize = max(16, Prefs.iconSize.rounded())
+        // Finder's grid: 112 x 112 cells at 64 pt icons, no gaps between them.
+        layout.itemSize = NSSize(width: max(112, iconSize + 48), height: iconSize + 48)
+        layout.minimumInteritemSpacing = 0
+        layout.minimumLineSpacing = 0
+        layout.sectionInset = NSEdgeInsets(top: 9, left: 10, bottom: 14, right: 10)
     }
 
-    @objc private func windowKeyChanged() {
+    // Finder's grid: a fixed pitch from the leading edge; spare width stays on the trailing side.
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        insetForSectionAt section: Int) -> NSEdgeInsets {
+        var inset = layout.sectionInset
+        let width = collectionView.bounds.width
+        let pitch = layout.itemSize.width
+        // 10 pt stay free for overlay scrollers.
+        let columns = max(1, ((width - inset.left - 10) / pitch).rounded(.down))
+        inset.right = max(0, width - inset.left - columns * pitch)
+        return inset
+    }
+
+    @objc private func windowKeyChanged(_ note: Notification) {
+        guard let window = note.object as? NSWindow, window === view.window else { return }
         refreshSelectionAppearance()
     }
 
@@ -292,20 +368,37 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
             if reset { collectionView.scroll(.zero) } else { select(selection, scroll: false) }
             return
         }
-        let difference = items.difference(from: previous)
-        if difference.count > 300 {
+        var removed = Set<IndexPath>()
+        var inserted = Set<IndexPath>()
+        // FileItem's == and hash are identity, so these compare identity.
+        let oldSet = Set(previous), newSet = Set(items)
+        let orderKept = previous.lazy.filter { newSet.contains($0) }.elementsEqual(items.lazy.filter { oldSet.contains($0) })
+        var reloadAll = false
+        if orderKept {
+            // The items that stay kept their order: the difference is just what
+            // left and what came (O(n), and the same as Myers' result).
+            for (offset, file) in previous.enumerated() where !newSet.contains(file) {
+                removed.insert(IndexPath(item: offset, section: 0))
+            }
+            for (offset, file) in items.enumerated() where !oldSet.contains(file) {
+                inserted.insert(IndexPath(item: offset, section: 0))
+            }
+        } else if previous.count + items.count > 2000 {
+            // Items moved. Myers is O(n·d): too slow on the main thread for big lists.
+            reloadAll = true
+        } else {
+            for change in items.difference(from: previous) {
+                switch change {
+                case let .remove(offset, _, _): removed.insert(IndexPath(item: offset, section: 0))
+                case let .insert(offset, _, _): inserted.insert(IndexPath(item: offset, section: 0))
+                }
+            }
+        }
+        if reloadAll || removed.count + inserted.count > 300 {
             let selection = selectedItems
             collectionView.reloadData()
             select(selection, scroll: false)
             return
-        }
-        var removed = Set<IndexPath>()
-        var inserted = Set<IndexPath>()
-        for change in difference {
-            switch change {
-            case let .remove(offset, _, _): removed.insert(IndexPath(item: offset, section: 0))
-            case let .insert(offset, _, _): inserted.insert(IndexPath(item: offset, section: 0))
-            }
         }
         collectionView.animator().performBatchUpdates({
             if !removed.isEmpty { collectionView.deleteItems(at: removed) }
@@ -326,10 +419,15 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         if let iconItem = item as? IconViewItem, indexPath.item < items.count {
             iconItem.controller = self
             let file = items[indexPath.item]
-            iconItem.configure(file, iconSize: Prefs.iconSize, itemWidth: layout.itemSize.width,
+            iconItem.configure(file, iconSize: iconSize, itemWidth: layout.itemSize.width,
                                dimmed: pane?.isCut(file) ?? false)
         }
         return item
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, viewForSupplementaryElementOfKind kind: NSCollectionView.SupplementaryElementKind,
+                        at indexPath: IndexPath) -> NSView {
+        collectionView.makeSupplementaryView(ofKind: kind, withIdentifier: IconViewController.gapIdentifier, for: indexPath)
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
@@ -378,6 +476,8 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
     }
 
     override func appearanceSettingsDidChange() {
+        // Only the icon size affects this view; every other preference is a no-op here.
+        guard max(16, Prefs.iconSize.rounded()) != iconSize else { return }
         configureLayout()
         layout.invalidateLayout()
         let selection = selectedItems
@@ -431,7 +531,7 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         let newName = field.stringValue
         view.window?.makeFirstResponder(collectionView)
         if newName == file.name || pane?.commitRename(file, to: newName) != true {
-            (field.superview as? IconItemView)?.setName(file.name, itemWidth: layout.itemSize.width)
+            (field.superview as? IconItemView)?.setName(file.displayName, itemWidth: layout.itemSize.width)
         }
         refreshSelectionAppearance()
     }
@@ -441,7 +541,7 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
            let field = control as? NSTextField {
             renamingItem = nil
             field.abortEditing()
-            (field.superview as? IconItemView)?.setName(file.name, itemWidth: layout.itemSize.width)
+            (field.superview as? IconItemView)?.setName(file.displayName, itemWidth: layout.itemSize.width)
             field.isEditable = false
             view.window?.makeFirstResponder(collectionView)
             refreshSelectionAppearance()

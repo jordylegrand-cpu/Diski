@@ -30,6 +30,22 @@ final class ColumnTableView: NSTableView {
         if let field = responder as? NSTextField, !field.isEditable { return false }
         return super.validateProposedFirstResponder(responder, for: event)
     }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateRowHeight()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateRowHeight()
+    }
+
+    /// Finder's rows: 22.5 pt on Retina (45 px), 22 pt on 1x screens, where NSTableView would round 22.5 up to 23.
+    private func updateRowHeight() {
+        let height: CGFloat = (window?.backingScaleFactor ?? 2) > 1.5 ? 20.5 : 20
+        if rowHeight != height { rowHeight = height }
+    }
 }
 
 final class ColumnCellView: NSTableCellView {
@@ -38,6 +54,12 @@ final class ColumnCellView: NSTableCellView {
     let chevron = NSImageView()
     let tags = TagDotView()
     let loader = ItemImageLoader()
+    /// 0 without a tag dot, so an untagged name runs right up to the chevron.
+    private var tagsGap: NSLayoutConstraint!
+    private static let chevronImage = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+    /// Finder's chevron on the blue highlight is translucent white, not solid.
+    private static let emphasizedChevron = NSColor.alternateSelectedControlTextColor.withAlphaComponent(0.6)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -49,24 +71,27 @@ final class ColumnCellView: NSTableCellView {
         textField = name
         icon.imageScaling = .scaleProportionallyUpOrDown
         name.lineBreakMode = .byTruncatingMiddle
+        name.allowsExpansionToolTips = true
         name.font = .systemFont(ofSize: NSFont.systemFontSize)
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
-        chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        chevron.image = Self.chevronImage
         chevron.contentTintColor = .tertiaryLabelColor
-        // Finder's metrics: 16 pt icon 6 pt into the highlight, the name 5 pt
-        // after it, the chevron 8 pt before the highlight's end.
+        tags.isHidden = true
+        tagsGap = tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 0)
+        // Finder's metrics: 16 pt icon 6 pt into the highlight, the name field 5 pt
+        // after the icon (its ink 21 pt after the icon's), the chevron about 6 pt
+        // before the highlight's end.
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 16),
             icon.heightAnchor.constraint(equalToConstant: 16),
-            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 3),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
-            tags.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 4),
+            tagsGap,
             tags.centerYAnchor.constraint(equalTo: centerYAnchor),
-            chevron.leadingAnchor.constraint(greaterThanOrEqualTo: tags.trailingAnchor, constant: 4),
-            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            chevron.leadingAnchor.constraint(greaterThanOrEqualTo: tags.trailingAnchor, constant: 2),
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: 8),
         ])
@@ -76,17 +101,21 @@ final class ColumnCellView: NSTableCellView {
 
     func configure(_ item: FileItem, dimmed: Bool) {
         objectValue = item
-        name.stringValue = item.name
-        name.isEditable = false
+        name.stringValue = item.displayName
+        if name.isEditable { name.isEditable = false }
         chevron.isHidden = !item.isNavigable
-        loader.load(item, into: icon, points: 16, thumbnails: false)
+        loader.load(item, into: icon, points: 16, thumbnails: Prefs.showThumbnailsInList, iconMode: true)
         icon.alphaValue = (dimmed || item.isHidden) ? 0.5 : 1
         let label = item.labelIndex
-        tags.colors = label > 0 ? [TagColors.color(forLabel: label)] : []
+        // Unchanged tags skip TagDotView's didSet (and the Auto Layout pass it causes).
+        let colors: [NSColor] = label > 0 ? [TagColors.color(forLabel: label)] : []
+        if tags.colors != colors { tags.colors = colors }
+        let gap: CGFloat = colors.isEmpty ? 0 : 4
+        if tagsGap.constant != gap { tagsGap.constant = gap }
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { chevron.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .tertiaryLabelColor }
+        didSet { chevron.contentTintColor = backgroundStyle == .emphasized ? Self.emphasizedChevron : .tertiaryLabelColor }
     }
 
     override func prepareForReuse() {
@@ -95,56 +124,13 @@ final class ColumnCellView: NSTableCellView {
     }
 }
 
-/// The last column when a file is selected: a big preview and key facts.
-final class ColumnPreviewView: NSView {
-    private let image = NSImageView()
-    private let title = NSTextField(wrappingLabelWithString: "")
-    private let subtitle = NSTextField(labelWithString: "")
-    private let info = NSTextField(wrappingLabelWithString: "")
-    private let loader = ItemImageLoader()
-
-    init(item: FileItem) {
-        super.init(frame: .zero)
-        let stack = NSStackView(views: [image, title, subtitle, info])
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        image.imageScaling = .scaleProportionallyUpOrDown
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.alignment = .center
-        title.maximumNumberOfLines = 3
-        subtitle.font = .systemFont(ofSize: 11)
-        subtitle.textColor = .secondaryLabelColor
-        info.font = .systemFont(ofSize: 11)
-        info.textColor = .secondaryLabelColor
-        info.alignment = .center
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            image.widthAnchor.constraint(equalToConstant: 180),
-            image.heightAnchor.constraint(equalToConstant: 180),
-            title.widthAnchor.constraint(lessThanOrEqualToConstant: 240),
-            info.widthAnchor.constraint(lessThanOrEqualToConstant: 240),
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 28),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-        ])
-        title.stringValue = item.name
-        let size = item.displaySize >= 0 ? " - " + Formatters.size(item.displaySize) : ""
-        subtitle.stringValue = FileKinds.kind(for: item) + size
-        info.stringValue = "Created \(Formatters.longDate(item.createdDate))\nModified \(Formatters.longDate(item.modifiedDate))"
-        loader.load(item, into: image, points: 180, thumbnails: true)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-}
-
 /// Lays columns out side by side with fixed widths. Manual layout keeps the
 /// horizontal scroller's document view from driving the window's size.
 final class ColumnsDocumentView: NSView {
     override var isFlipped: Bool { true }
     private(set) var entries: [(view: NSView, width: CGFloat)] = []
+    /// Legacy scrollers: each column's track is the divider, so no separators are drawn.
+    var hidesDividers = false { didSet { if hidesDividers != oldValue { needsLayout = true } } }
 
     var contentWidth: CGFloat { entries.reduce(0) { $0 + $1.width } }
 
@@ -172,6 +158,11 @@ final class ColumnsDocumentView: NSView {
         var x: CGFloat = 0
         for entry in entries {
             entry.view.frame = NSRect(x: x, y: 0, width: entry.width, height: bounds.height)
+            if let box = entry.view as? NSBox {
+                // No line where the strip ends at the preview pane or the window edge; legacy scroller tracks divide the columns themselves.
+                let hide = hidesDividers || x + entry.width >= bounds.width - 8
+                if box.isHidden != hide { box.isHidden = hide }
+            }
             x += entry.width
         }
     }
@@ -205,26 +196,35 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     private var draggedItems: [FileItem] = []
     private static let cellID = NSUserInterfaceItemIdentifier("ColumnCell")
 
+    private static let nameAttributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+
     /// Like Finder, each column is as wide as its longest name needs, within limits.
     private static func fittedWidth(for items: [FileItem]) -> CGFloat {
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
-        // Only the longest names can be the widest: measure at most 96 of them.
+        // Only the longest names can be the widest: measure at most 96 of them (O(n) length histogram).
         var candidates = items
         if items.count > 96 {
-            let lengths = items.map { $0.name.utf16.count }.sorted(by: >)
-            let threshold = lengths[95]
-            candidates = Array(items.lazy.filter { $0.name.utf16.count >= threshold }.prefix(128))
+            var histogram = [Int](repeating: 0, count: 256)
+            for item in items { histogram[min(item.displayName.utf16.count, 255)] += 1 }
+            var threshold = 255, count = 0
+            while threshold > 0 { count += histogram[threshold]; if count >= 96 { break }; threshold -= 1 }
+            candidates = Array(items.lazy.filter { min($0.displayName.utf16.count, 255) >= threshold }.prefix(128))
         }
         var widest: CGFloat = 0
         var tagged = false
         for item in candidates {
-            widest = max(widest, (item.name as NSString).size(withAttributes: attributes).width)
+            widest = max(widest, (item.displayName as NSString).size(withAttributes: nameAttributes).width)
             if item.labelIndex > 0 { tagged = true }
         }
-        // Insets (10 + 10), icon (6 + 16 + 5), chevron (8 + 6 + 8), tag dot.
-        let chrome: CGFloat = 69 + (tagged ? 14 : 0)
-        return min(420, max(152, (widest + chrome).rounded(.up)))
+        // .inset cell padding (16 + 16), icon 16 + 5, label padding 4, 2 + chevron 8; tag dot 4 + 10.
+        var chrome: CGFloat = 67 + (tagged ? 14 : 0)
+        if NSScroller.preferredScrollerStyle == .legacy {
+            chrome += NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+        }
+        return min(480, max(152, (widest + chrome).rounded(.up)))
     }
+
+    /// Legacy (always visible) scrollers take room in every column and replace the dividers.
+    private var legacyScrollers: Bool { NSScroller.preferredScrollerStyle == .legacy }
 
     override func loadView() {
         document.autoresizingMask = []
@@ -238,14 +238,28 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentView.postsFrameChangedNotifications = true
         contextMenu.delegate = self
+        document.hidesDividers = legacyScrollers
         view = scrollView
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(directoryDidUpdate(_:)), name: DirectoryStore.didUpdate, object: nil)
         center.addObserver(self, selector: #selector(clipResized), name: NSView.frameDidChangeNotification,
                            object: scrollView.contentView)
+        center.addObserver(self, selector: #selector(scrollerStyleChanged),
+                           name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
     }
 
     @objc private func clipResized() {
+        resizeDocument()
+    }
+
+    /// Legacy scrollers: like Finder, each column's always-visible track is its divider (no hairline next to it).
+    @objc private func scrollerStyleChanged() {
+        let legacy = legacyScrollers
+        for column in columns {
+            column.scroll.autohidesScrollers = !legacy
+            document.setWidth(Self.fittedWidth(for: column.items), for: column.scroll)
+        }
+        document.hidesDividers = legacy
         resizeDocument()
     }
 
@@ -288,7 +302,22 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
                 let listing = DirectoryStore.shared.listing(for: column.path)
                 replaceItems(of: column, with: pane?.arrange(listing.items) ?? listing.items)
             }
+        } else if let column = columns.first(where: { $0.path == directoryPath }) {
+            // The deepest folder changed on disk (the pane's listing; directoryDidUpdate leaves it to the pane).
+            replaceItems(of: column, with: items) // the pane's already-arranged items
         }
+    }
+
+    /// A folder's items for a new column: a cached listing shows at once and is quietly re-read in the background when stale (directoryDidUpdate then refreshes the column); an uncached one is read now.
+    private func columnItems(for path: String) -> [FileItem] {
+        let store = DirectoryStore.shared
+        let listing = store.listing(for: path)
+        if listing.isLoaded {
+            store.load(path)
+        } else {
+            store.loadNow(path)
+        }
+        return pane?.arrange(listing.items) ?? listing.items
     }
 
     private func rebuild(to path: String) {
@@ -315,8 +344,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
             if directory == path {
                 arranged = items
             } else {
-                let listing = DirectoryStore.shared.loadNow(directory)
-                arranged = pane?.arrange(listing.items) ?? listing.items
+                arranged = columnItems(for: directory)
             }
             let column = addColumn(path: directory, items: arranged)
             if index + 1 < chain.count, let row = column.items.firstIndex(where: { $0.path == chain[index + 1] }) {
@@ -368,7 +396,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
 
         column.scroll.documentView = table
         column.scroll.hasVerticalScroller = true
-        column.scroll.autohidesScrollers = true
+        column.scroll.autohidesScrollers = !legacyScrollers
         column.scroll.drawsBackground = false
         column.scroll.borderType = .noBorder
         column.separator.boxType = .separator
@@ -399,11 +427,22 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         resizeDocument()
     }
 
+    /// One preview, reused for every file: it looks like the preview pane, and
+    /// each selection cancels the previous thumbnail request.
+    private lazy var previewController: InspectorViewController = {
+        let controller = InspectorViewController()
+        self.addChild(controller)
+        return controller
+    }()
+
     private func showPreview(for item: FileItem) {
-        let view = ColumnPreviewView(item: item)
+        let view = previewController.view
         document.append(view, width: 300)
         preview = view
         resizeDocument()
+        // Lay the column out first so the thumbnail is requested at the preview's real size, not 64 pt.
+        document.layoutSubtreeIfNeeded()
+        previewController.show(items: [item], folderPath: nil) // cancels the previous thumbnail request
     }
 
     private func scrollToEnd(animated: Bool) {
@@ -413,6 +452,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         let visible = scrollView.contentView.bounds.width
         let x = max(0, width - visible)
         let point = NSPoint(x: x, y: 0)
+        guard scrollView.contentView.bounds.origin != point else { return }
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
@@ -421,8 +461,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
             }
         } else {
             scrollView.contentView.scroll(to: point)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
-        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private func replaceItems(of column: Column, with newItems: [FileItem]) {
@@ -432,10 +472,9 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         resizeDocument()
         isSyncing = true
         column.table.reloadData()
+        let wanted = Set(selected.map { ObjectIdentifier($0) })
         var rows = IndexSet()
-        for item in selected {
-            if let row = newItems.firstIndex(where: { $0 === item }) { rows.insert(row) }
-        }
+        for (row, item) in newItems.enumerated() where wanted.contains(ObjectIdentifier(item)) { rows.insert(row) }
         column.table.selectRowIndexes(rows, byExtendingSelection: false)
         isSyncing = false
         // A folder whose column is open may have disappeared.
@@ -446,7 +485,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     }
 
     @objc private func directoryDidUpdate(_ notification: Notification) {
-        guard let listing = notification.object as? DirectoryStore.Listing,
+        // The pane's own listing (the deepest folder) arrives arranged through itemsDidChange.
+        guard let listing = notification.object as? DirectoryStore.Listing, listing !== pane?.listing,
               let column = columns.first(where: { $0.path == listing.path }) else { return }
         replaceItems(of: column, with: pane?.arrange(listing.items) ?? listing.items)
     }
@@ -477,7 +517,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
 
     func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
         guard let (_, column) = columnInfo(for: tableView), row < column.items.count else { return nil }
-        return column.items[row].name
+        return column.items[row].displayName
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -490,8 +530,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
             if item.isNavigable {
                 var path = item.path
                 if item.type == .symlink { path = URL(fileURLWithPath: path).resolvingSymlinksInPath().path }
-                let listing = DirectoryStore.shared.loadNow(path)
-                addColumn(path: path, items: pane?.arrange(listing.items) ?? listing.items)
+                addColumn(path: path, items: columnItems(for: path))
             } else {
                 showPreview(for: item)
             }
@@ -511,7 +550,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
             isSyncing = true
             columns[index].table.deselectAll(nil)
             isSyncing = false
-            removePreview()
+            removeColumns(after: index) // also removes the preview
+            columnsDidChange()
             notifySelectionChanged()
             return true
         }
@@ -549,13 +589,21 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     }
 
     override func select(_ files: [FileItem], scroll: Bool) {
-        guard let column = columns.last else { return }
+        guard !columns.isEmpty else { return }
+        // The deepest column that holds the items (a re-sort keeps a folder selected in an earlier column).
+        let wanted = Set(files.map { ObjectIdentifier($0) })
+        var target = columns.count - 1
         var rows = IndexSet()
-        for file in files {
-            if let row = column.items.firstIndex(where: { $0 === file }) { rows.insert(row) }
+        if !wanted.isEmpty {
+            for index in stride(from: columns.count - 1, through: 0, by: -1) {
+                var found = IndexSet()
+                for (row, item) in columns[index].items.enumerated() where wanted.contains(ObjectIdentifier(item)) { found.insert(row) }
+                if !found.isEmpty { target = index; rows = found; break }
+            }
         }
-        activeColumn = columns.count - 1
-        column.table.selectRowIndexes(rows, byExtendingSelection: false)
+        let column = columns[target]
+        activeColumn = target
+        if column.table.selectedRowIndexes != rows { column.table.selectRowIndexes(rows, byExtendingSelection: false) }
         if scroll, let first = rows.first { column.table.scrollRowToVisible(first) }
     }
 
@@ -609,6 +657,8 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
             cell.name.isEditable = true
             cell.name.isSelectable = true
             cell.name.delegate = self
+            cell.name.lineBreakMode = .byClipping
+            cell.name.stringValue = file.name   // the full name while editing
             window.makeFirstResponder(cell.name)
             cell.name.currentEditor()?.selectedRange = NameCellView.editableRange(for: file.name)
             return
@@ -620,9 +670,11 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         renamingItem = nil
         field.isEditable = false
         field.isSelectable = false
+        field.lineBreakMode = .byTruncatingMiddle
         focus()
-        if field.stringValue != file.name, pane?.commitRename(file, to: field.stringValue) != true {
-            field.stringValue = file.name
+        let newName = field.stringValue
+        if newName == file.name || pane?.commitRename(file, to: newName) != true {
+            field.stringValue = file.displayName
         }
     }
 
@@ -631,8 +683,9 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
            let field = control as? NSTextField {
             renamingItem = nil
             field.abortEditing()
-            field.stringValue = file.name
+            field.stringValue = file.displayName
             field.isEditable = false
+            field.lineBreakMode = .byTruncatingMiddle
             focus()
             return true
         }

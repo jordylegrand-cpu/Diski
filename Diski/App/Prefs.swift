@@ -56,15 +56,8 @@ enum RowDensity: Int, CaseIterable {
         }
     }
 
-    /// Finder's list rows: 22.5 pt with small icons, 33.5 pt with large ones
-    /// (row height plus 2 pt between rows).
-    var rowHeight: CGFloat {
-        switch self {
-        case .compact: return 20.5
-        case .regular: return 26
-        case .comfortable: return 31.5
-        }
-    }
+    // The list's row metrics (Finder's) live in ListViewController.swift
+    // (RowDensity.listRowHeight).
 
     var iconSize: CGFloat {
         switch self {
@@ -75,7 +68,8 @@ enum RowDensity: Int, CaseIterable {
     }
 }
 
-/// User preferences (UserDefaults-backed). Posts `Prefs.didChange` on writes.
+/// User preferences (UserDefaults-backed). Posts `Prefs.didChange` (with the
+/// setting's name under `changedKey`) when a write changes a value.
 enum Prefs {
     static let didChange = Notification.Name("DiskiPrefsDidChange")
     private static let defaults = UserDefaults.standard
@@ -105,33 +99,44 @@ enum Prefs {
         ])
     }
 
-    private static func changed() {
-        NotificationCenter.default.post(name: didChange, object: nil)
+    /// `didChange` userInfo key: the name (String) of the setting that changed.
+    static let changedKey = "key"
+
+    private static func changed(_ key: String) {
+        NotificationCenter.default.post(name: didChange, object: nil, userInfo: [changedKey: key])
+    }
+
+    /// Writes `value` and posts `didChange`, only when the value really changes
+    /// (a registered default counts as the current value).
+    private static func store<T: Equatable>(_ value: T, forKey key: String, notify: Bool = true) {
+        if let current = defaults.object(forKey: key) as? T, current == value { return }
+        defaults.set(value, forKey: key)
+        if notify { changed(key) }
     }
 
     static var showHiddenFiles: Bool {
         get { defaults.bool(forKey: "showHiddenFiles") }
-        set { defaults.set(newValue, forKey: "showHiddenFiles"); changed() }
+        set { store(newValue, forKey: "showHiddenFiles") }
     }
 
     static var foldersOnTop: Bool {
         get { defaults.bool(forKey: "foldersOnTop") }
-        set { defaults.set(newValue, forKey: "foldersOnTop"); changed() }
+        set { store(newValue, forKey: "foldersOnTop") }
     }
 
     static var showFullPathInTitle: Bool {
         get { defaults.bool(forKey: "showFullPathInTitle") }
-        set { defaults.set(newValue, forKey: "showFullPathInTitle"); changed() }
+        set { store(newValue, forKey: "showFullPathInTitle") }
     }
 
     static var calculateFolderSizes: Bool {
         get { defaults.bool(forKey: "calculateFolderSizes") }
-        set { defaults.set(newValue, forKey: "calculateFolderSizes"); changed() }
+        set { store(newValue, forKey: "calculateFolderSizes") }
     }
 
     static var useClones: Bool {
         get { defaults.bool(forKey: "useClones") }
-        set { defaults.set(newValue, forKey: "useClones"); changed() }
+        set { store(newValue, forKey: "useClones") }
     }
 
     /// Parallel copy streams; 0 means automatic.
@@ -140,87 +145,87 @@ enum Prefs {
             let value = defaults.integer(forKey: "copyStreams")
             return value > 0 ? value : max(4, min(8, ProcessInfo.processInfo.activeProcessorCount))
         }
-        set { defaults.set(newValue, forKey: "copyStreams"); changed() }
+        set { store(newValue, forKey: "copyStreams") }
     }
 
     static var copyStreamsSetting: Int {
         get { defaults.integer(forKey: "copyStreams") }
-        set { defaults.set(newValue, forKey: "copyStreams"); changed() }
+        set { store(newValue, forKey: "copyStreams") }
     }
 
     static var returnKeyOpens: Bool {
         get { defaults.bool(forKey: "returnKeyOpens") }
-        set { defaults.set(newValue, forKey: "returnKeyOpens"); changed() }
+        set { store(newValue, forKey: "returnKeyOpens") }
     }
 
     static var defaultViewMode: ViewMode {
         get { ViewMode(rawValue: defaults.integer(forKey: "defaultViewMode")) ?? .list }
-        set { defaults.set(newValue.rawValue, forKey: "defaultViewMode"); changed() }
+        set { store(newValue.rawValue, forKey: "defaultViewMode") }
     }
 
     static var showPathBar: Bool {
         get { defaults.bool(forKey: "showPathBar") }
-        set { defaults.set(newValue, forKey: "showPathBar"); changed() }
+        set { store(newValue, forKey: "showPathBar") }
     }
 
     static var showStatusInfo: Bool {
         get { defaults.bool(forKey: "showStatusInfo") }
-        set { defaults.set(newValue, forKey: "showStatusInfo"); changed() }
+        set { store(newValue, forKey: "showStatusInfo") }
     }
 
     static var showInspector: Bool {
         get { defaults.bool(forKey: "showInspector") }
-        set { defaults.set(newValue, forKey: "showInspector") }
+        set { store(newValue, forKey: "showInspector", notify: false) }
     }
 
     static var rowDensity: RowDensity {
         get { RowDensity(rawValue: defaults.integer(forKey: "rowDensity")) ?? .comfortable }
-        set { defaults.set(newValue.rawValue, forKey: "rowDensity"); changed() }
+        set { store(newValue.rawValue, forKey: "rowDensity") }
     }
 
     static var iconSize: CGFloat {
         get { CGFloat(defaults.double(forKey: "iconSize")) }
-        set { defaults.set(Double(newValue), forKey: "iconSize"); changed() }
+        set { store(Double(newValue), forKey: "iconSize") }
     }
 
     static var sortKey: SortKey {
         get { SortKey(rawValue: defaults.string(forKey: "sortKey") ?? "") ?? .name }
-        set { defaults.set(newValue.rawValue, forKey: "sortKey") }
+        set { store(newValue.rawValue, forKey: "sortKey", notify: false) }
     }
 
     static var sortAscending: Bool {
         get { defaults.bool(forKey: "sortAscending") }
-        set { defaults.set(newValue, forKey: "sortAscending") }
+        set { store(newValue, forKey: "sortAscending", notify: false) }
     }
 
     static var confirmEmptyTrash: Bool {
         get { defaults.bool(forKey: "confirmEmptyTrash") }
-        set { defaults.set(newValue, forKey: "confirmEmptyTrash"); changed() }
+        set { store(newValue, forKey: "confirmEmptyTrash") }
     }
 
     static var showThumbnailsInList: Bool {
         get { defaults.bool(forKey: "showThumbnailsInList") }
-        set { defaults.set(newValue, forKey: "showThumbnailsInList"); changed() }
+        set { store(newValue, forKey: "showThumbnailsInList") }
     }
 
     static var showOperationToasts: Bool {
         get { defaults.bool(forKey: "showOperationToasts") }
-        set { defaults.set(newValue, forKey: "showOperationToasts"); changed() }
+        set { store(newValue, forKey: "showOperationToasts") }
     }
 
     static var listColumns: [String] {
         get { defaults.stringArray(forKey: "listColumns") ?? ["modified", "size", "kind"] }
-        set { defaults.set(newValue, forKey: "listColumns"); changed() }
+        set { store(newValue, forKey: "listColumns") }
     }
 
     static var terminalBundleID: String {
         get { defaults.string(forKey: "terminalBundleID") ?? "com.apple.Terminal" }
-        set { defaults.set(newValue, forKey: "terminalBundleID"); changed() }
+        set { store(newValue, forKey: "terminalBundleID") }
     }
 
     static var newWindowPath: String {
         get { defaults.string(forKey: "newWindowPath") ?? NSHomeDirectory() }
-        set { defaults.set(newValue, forKey: "newWindowPath"); changed() }
+        set { store(newValue, forKey: "newWindowPath") }
     }
 
     static var favorites: [String] {
@@ -231,16 +236,17 @@ enum Prefs {
             if FileManager.default.fileExists(atPath: home + "/Developer") { list.append(home + "/Developer") }
             return list
         }
-        set { defaults.set(newValue, forKey: "favorites"); changed() }
+        set { store(newValue, forKey: "favorites") }
     }
 
     static var recentFolders: [String] {
         get { defaults.stringArray(forKey: "recentFolders") ?? [] }
-        set { defaults.set(Array(newValue.prefix(40)), forKey: "recentFolders") }
+        set { store(Array(newValue.prefix(40)), forKey: "recentFolders", notify: false) }
     }
 
     static func noteVisited(_ path: String) {
         var list = recentFolders
+        if list.first == path { return }
         list.removeAll { $0 == path }
         list.insert(path, at: 0)
         recentFolders = list

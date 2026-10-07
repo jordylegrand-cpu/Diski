@@ -9,6 +9,10 @@ final class GoToFolderModel {
     private(set) var suggestions: [String] = []
     var selected = 0
     var onChange: (() -> Void)?
+    /// The folder last listed and its subfolders' names (hidden ones too),
+    /// sorted: typing more of a name only filters them.
+    private var cachedParent: String?
+    private var cachedNames: [String] = []
 
     init(start: String) {
         let home = NSHomeDirectory()
@@ -38,12 +42,23 @@ final class GoToFolderModel {
                 parent = (path as NSString).deletingLastPathComponent
                 prefix = (path as NSString).lastPathComponent.lowercased()
             }
-            var names: [String] = []
-            try? DirectoryReader.forEachEntry(inDirectory: parent.isEmpty ? "/" : parent, detailed: true) { item in
-                guard item.isNavigable, !item.name.hasPrefix(".") || prefix.hasPrefix(".") else { return }
-                if prefix.isEmpty || item.name.lowercased().hasPrefix(prefix) { names.append(item.name) }
+            // The folder is read and sorted once, not on every keystroke.
+            let directory = parent.isEmpty ? "/" : parent
+            if directory != cachedParent {
+                var all: [String] = []
+                // Only folders and links can be navigable: everything else is skipped before it becomes an item.
+                try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true,
+                                                  include: { _, type in type == DirectoryReader.vDIR || type == DirectoryReader.vLNK }) { item in
+                    guard item.isNavigable else { return }
+                    all.append(item.name)
+                }
+                all.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+                cachedNames = all
+                cachedParent = directory
             }
-            names.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+            let names = cachedNames.filter {
+                (!$0.hasPrefix(".") || prefix.hasPrefix(".")) && (prefix.isEmpty || $0.lowercased().hasPrefix(prefix))
+            }
             let base = parent == "/" ? "" : parent
             results = names.prefix(12).map { base + "/" + $0 }
         } else if !raw.isEmpty {
@@ -120,6 +135,8 @@ private final class GoToFolderCell: NSTableCellView {
             name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
             location.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 8),
+            // A long name truncates in the middle instead of running off the row.
+            name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
             location.firstBaselineAnchor.constraint(equalTo: name.firstBaselineAnchor),
             location.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
         ])
@@ -219,7 +236,7 @@ final class GoToFolderController: NSObject, NSTextFieldDelegate, NSTableViewData
         for view in [title, field, scroll, buttons] as [NSView] { content.addSubview(view) }
         tableHeight = scroll.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             field.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
             field.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
@@ -231,7 +248,7 @@ final class GoToFolderController: NSObject, NSTextFieldDelegate, NSTableViewData
             buttons.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
             buttons.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             buttons.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             content.widthAnchor.constraint(equalToConstant: 520),
         ])
         panel.contentView = content
@@ -252,6 +269,13 @@ final class GoToFolderController: NSObject, NSTextFieldDelegate, NSTableViewData
                 panel.setContentSize(size)
             }
         }
+    }
+
+    /// Moves the highlight only: the rows themselves are unchanged.
+    private func selectSuggestion() {
+        guard model.selected < model.suggestions.count else { return }
+        table.selectRowIndexes(IndexSet(integer: model.selected), byExtendingSelection: false)
+        table.scrollRowToVisible(model.selected)
     }
 
     // MARK: Table
@@ -283,11 +307,11 @@ final class GoToFolderController: NSObject, NSTextFieldDelegate, NSTableViewData
         switch commandSelector {
         case #selector(NSResponder.moveDown(_:)):
             model.selected = min(model.selected + 1, max(0, model.suggestions.count - 1))
-            reload()
+            selectSuggestion()
             return true
         case #selector(NSResponder.moveUp(_:)):
             model.selected = max(model.selected - 1, 0)
-            reload()
+            selectSuggestion()
             return true
         case #selector(NSResponder.insertTab(_:)):
             model.completeSelection()
@@ -329,7 +353,10 @@ enum ConnectToServer {
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: UserDefaults.standard.string(forKey: "lastServer") ?? "smb://")
-        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        // Rounded like the Go to Folder field, at the control's own height.
+        field.bezelStyle = .roundedBezel
+        field.placeholderString = "smb://server/share"
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: field.intrinsicContentSize.height)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         let handler: (NSApplication.ModalResponse) -> Void = { response in

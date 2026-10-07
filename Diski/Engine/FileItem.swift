@@ -36,6 +36,9 @@ final class FileItem: Hashable, CustomStringConvertible {
     private(set) var isMountPoint: Bool
     /// For symlinks: whether the link resolves to a directory.
     private(set) var linkTargetIsDirectory: Bool
+    /// Dot-files and items with the BSD or Finder "hidden" flag (computed once:
+    /// every arrange and every cell asks).
+    private(set) var isHidden: Bool
 
     /// Recursive size computed in the background for folders (`-1` = not computed yet).
     var computedFolderSize: Int64 = -1
@@ -59,7 +62,14 @@ final class FileItem: Hashable, CustomStringConvertible {
         self.childCount = childCount
         self.isMountPoint = isMountPoint
         self.linkTargetIsDirectory = linkTargetIsDirectory
+        isHidden = FileItem.hidden(name: name, bsdFlags: bsdFlags, finderFlags: finderFlags)
     }
+
+    private static func hidden(name: String, bsdFlags: UInt32, finderFlags: UInt16) -> Bool {
+        name.utf8.first == UInt8(ascii: ".") || (bsdFlags & UInt32(UF_HIDDEN)) != 0 || (finderFlags & 0x4000) != 0
+    }
+
+    private static let showsAllExtensions = UserDefaults.standard.bool(forKey: "AppleShowAllExtensions")
 
     // MARK: Derived values
 
@@ -108,14 +118,16 @@ final class FileItem: Hashable, CustomStringConvertible {
     /// Folders and packages (anything that is a directory on disk).
     var isDirectoryOnDisk: Bool { type == .directory || type == .package }
 
-    var isHidden: Bool {
-        name.hasPrefix(".") || (bsdFlags & UInt32(UF_HIDDEN)) != 0 || (finderFlags & 0x4000) != 0
-    }
-
     var isAlias: Bool { type == .file && (finderFlags & 0x8000) != 0 }
     var hasCustomIcon: Bool { (finderFlags & 0x0400) != 0 }
     var isLocked: Bool { (bsdFlags & UInt32(UF_IMMUTABLE)) != 0 }
     var isApplication: Bool { type == .package && ext == "app" }
+
+    /// The name Finder shows: applications without ".app" unless all extensions are shown.
+    var displayName: String {
+        guard isApplication, !FileItem.showsAllExtensions, name.utf8.count > 4 else { return name }
+        return String(name.dropLast(4))
+    }
 
     /// Legacy Finder label index (0 = none, 1...7) kept in sync with the first colored tag.
     var labelIndex: Int { Int((finderFlags >> 1) & 0x7) }
@@ -153,6 +165,7 @@ final class FileItem: Hashable, CustomStringConvertible {
         childCount = other.childCount
         isMountPoint = other.isMountPoint
         linkTargetIsDirectory = other.linkTargetIsDirectory
+        isHidden = other.isHidden
         if changed { _url = nil }
         return changed
     }
@@ -166,7 +179,7 @@ extension FileItem {
     /// Builds an item for an arbitrary path with `lstat`, for places that do
     /// not come from a directory listing (sidebar, search results, drops).
     static func make(path rawPath: String) -> FileItem? {
-        let path = rawPath.count > 1 && rawPath.hasSuffix("/") ? String(rawPath.dropLast()) : rawPath
+        let path = rawPath.utf8.count > 1 && rawPath.utf8.last == UInt8(ascii: "/") ? String(rawPath.dropLast()) : rawPath
         var st = stat()
         guard lstat(path, &st) == 0 else { return nil }
         let name = path == "/" ? "/" : (path as NSString).lastPathComponent

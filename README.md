@@ -117,7 +117,7 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
 | ⌘1–⌘4 | Icons, List, Columns, Gallery |
 | ⌘F ⇧⌘G ⌥⌘C ⌘J | Filter/search, go to folder, copy path, view options |
 | ⌘\\ · F5 · F6 · Tab | Dual pane, copy/move to other pane, switch pane |
-| ⇧⌘. ⇧⌘P ⌥⌘P ⌥⌘S | Hidden files, preview, path bar, sidebar |
+| ⇧⌘. ⇧⌘P ⌥⌘P ⌃⌘S | Hidden files, preview, path bar, sidebar |
 
 Help › Diski Keyboard Shortcuts (⇧⌘/) shows the full list.
 
