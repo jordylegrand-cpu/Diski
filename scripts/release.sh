@@ -42,7 +42,9 @@ xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Release \
   build > "$WORK/build.log" 2>&1 || { grep -E "error:" "$WORK/build.log" >&2; fail "build failed"; }
 APP="$WORK/build/Build/Products/Release/Diski.app"
 codesign --verify --deep --strict "$APP"
-codesign -dv "$APP" 2>&1 | grep -q "^TeamIdentifier=$TEAM$" || fail "Diski.app is not signed by team $TEAM"
+SIGNATURE="$(codesign -dv --verbose=2 "$APP" 2>&1)"
+grep -q "^TeamIdentifier=$TEAM$" <<< "$SIGNATURE" && grep -q "^Authority=Developer ID Application" <<< "$SIGNATURE" \
+  || { echo "$SIGNATURE" >&2; fail "Diski.app is not signed with Developer ID by team $TEAM"; }
 
 echo "Notarizing…"
 ditto -c -k --keepParent "$APP" "$WORK/notarize.zip"
