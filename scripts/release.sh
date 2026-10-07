@@ -38,10 +38,12 @@ echo "Building $VERSION ($COMMIT)…"
 xcodebuild -project Diski.xcodeproj -scheme Diski -configuration Release \
   -destination 'generic/platform=macOS' -derivedDataPath "$WORK/build" \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM" \
-  OTHER_CODE_SIGN_FLAGS="--timestamp" ENABLE_HARDENED_RUNTIME=YES \
+  OTHER_CODE_SIGN_FLAGS="--timestamp" ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   build > "$WORK/build.log" 2>&1 || { grep -E "error:" "$WORK/build.log" >&2; fail "build failed"; }
 APP="$WORK/build/Build/Products/Release/Diski.app"
 codesign --verify --deep --strict "$APP"
+ENTITLEMENTS="$(codesign -d --entitlements - "$APP" 2>/dev/null || true)"
+grep -q "get-task-allow" <<< "$ENTITLEMENTS" && fail "Diski.app still has the get-task-allow entitlement"
 SIGNATURE="$(codesign -dv --verbose=2 "$APP" 2>&1)"
 grep -q "^TeamIdentifier=$TEAM$" <<< "$SIGNATURE" && grep -q "^Authority=Developer ID Application" <<< "$SIGNATURE" \
   || { echo "$SIGNATURE" >&2; fail "Diski.app is not signed with Developer ID by team $TEAM"; }
