@@ -21,15 +21,10 @@ Everything Finder does — and the things it should have done all along — with
 ## Install
 
 1. Download **Diski-v0.1.3-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
-2. The alpha is not notarized yet, so macOS blocks the first launch. Run this once in Terminal, then open Diski:
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Diski.app
-   ```
+2. Open Diski. It is signed with Developer ID and notarized by Apple, so it opens like any other app.
 3. For the Trash and other protected folders, turn on **Full Disk Access** for Diski in System Settings › Privacy & Security.
 
-Diski keeps itself up to date from GitHub releases (Settings › General, or Diski › Check for Updates…); updates install when Diski relaunches or quits.
-
-Because alphas are ad-hoc signed, macOS may ask for Full Disk Access again after an update.
+Diski keeps itself up to date from GitHub releases (Settings › General, or Diski › Check for Updates…); updates install when Diski relaunches or quits. Installs of 0.1.2 and earlier have no updater: download the latest release once by hand.
 
 ## Why it is fast
 
@@ -143,6 +138,8 @@ open Diski/Diski.xcodeproj   # then ⌘R
 Diski is not sandboxed (a file manager needs to see your files). The first time it opens Desktop, Documents or Downloads macOS asks for permission; for the Trash and other protected folders, turn on **Full Disk Access** for Diski in System Settings › Privacy & Security.
 
 Every push is built with Xcode 27, tested, launched and screenshotted on a macOS 27 runner by GitHub Actions (`.github/workflows/build.yml`); the app and the screenshots are attached to each run.
+
+Releases are built, signed with Developer ID, notarized and published from a Mac with `scripts/release.sh v0.1.3-alpha [whats-new.md]`, after bumping `MARKETING_VERSION` and pushing to `main`.
 
 ## Architecture
 

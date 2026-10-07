@@ -89,9 +89,10 @@ final class Updater {
                 let archive = directory.appendingPathComponent("Diski.zip")
                 try FileManager.default.moveItem(at: download, to: archive)
                 let identifier = Bundle.main.bundleIdentifier
+                let team = Self.teamIdentifier(of: bundleURL)
                 let app = try await Task.detached(priority: .userInitiated) {
                     try Self.prepareApp(archive: archive, directory: directory, checksum: checksum,
-                                        identifier: identifier, version: version)
+                                        identifier: identifier, team: team, version: version)
                 }.value
                 if let previous = stagingDirectory { try? FileManager.default.removeItem(at: previous) }
                 stagingDirectory = directory
@@ -209,7 +210,7 @@ final class Updater {
     }
 
     nonisolated private static func prepareApp(archive: URL, directory: URL, checksum: String,
-                                               identifier: String?, version: String) throws -> URL {
+                                               identifier: String?, team: String?, version: String) throws -> URL {
         let handle = try FileHandle(forReadingFrom: archive)
         defer { try? handle.close() }
         var hash = SHA256()
@@ -230,12 +231,27 @@ final class Updater {
             throw UpdateError("The update's app identifier or version does not match the release.")
         }
         _ = try run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
+        // A Developer ID build only accepts updates signed by the same team.
+        var requirement: SecRequirement?
+        if let team, SecRequirementCreateWithString(
+            "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"" as CFString, [], &requirement) != errSecSuccess {
+            throw UpdateError("The update's signing requirement could not be created.")
+        }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(app as CFURL, [], &code) == errSecSuccess,
-              let code, SecStaticCodeCheckValidity(code, [], nil) == errSecSuccess else {
-            throw UpdateError("The update's code signature is invalid.")
+              let code, SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else {
+            throw UpdateError("The update's code signature is invalid or from another developer.")
         }
         return app
+    }
+
+    nonisolated private static func teamIdentifier(of bundle: URL) -> String? {
+        var code: SecStaticCode?
+        var info: CFDictionary?
+        guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any] else { return nil }
+        return info[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     nonisolated private static func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
