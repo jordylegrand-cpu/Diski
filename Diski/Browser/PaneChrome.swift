@@ -51,6 +51,7 @@ final class BottomBarView: NSView {
         pathControl.focusRingType = .none
         pathControl.target = self
         pathControl.action = #selector(pathClicked(_:))
+        pathControl.delegate = self
         // Both stay below a split view's holding priority (250), so the bar
         // never decides how wide a pane is: the path yields first, then the status.
         pathControl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(230), for: .horizontal)
@@ -239,7 +240,23 @@ final class BottomBarView: NSView {
     }
 
     @objc private func sliderChanged(_ sender: NSSlider) {
-        onIconSizeChange?(CGFloat(sender.doubleValue))
+        // Whole multiples of 4, like View Options: odd sizes centre icons on half points.
+        let size = CGFloat((sender.doubleValue / 4).rounded() * 4)
+        guard size != Prefs.iconSize else { return }
+        onIconSizeChange?(size)
+    }
+}
+
+extension BottomBarView: NSPathControlDelegate {
+    /// Dragging a folder out of the path, like Finder. The items are made by
+    /// hand and carry no URL, so the drag writes the component's path.
+    func pathControl(_ pathControl: NSPathControl, shouldDrag pathComponentCell: NSPathComponentCell,
+                     with pasteboard: NSPasteboard) -> Bool {
+        guard let cell = pathControl.cell as? NSPathCell,
+              let i = cell.pathComponentCells.firstIndex(where: { $0 === pathComponentCell }), i < componentPaths.count
+        else { return false }
+        pasteboard.clearContents()
+        return pasteboard.writeObjects([URL(fileURLWithPath: componentPaths[i]) as NSURL])
     }
 }
 

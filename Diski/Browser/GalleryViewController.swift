@@ -190,19 +190,36 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
             reloadStrip(previous: previous, reset: reset)
             return
         }
-        let difference = items.difference(from: previous)
-        if difference.count > 300 {
-            reloadStrip(previous: previous, reset: false)
-            return
-        }
         // Only the thumbnails that came or went; the strip moves the selection along.
         var removed = Set<IndexPath>()
         var inserted = Set<IndexPath>()
-        for change in difference {
-            switch change {
-            case let .remove(offset, _, _): removed.insert(IndexPath(item: offset, section: 0))
-            case let .insert(offset, _, _): inserted.insert(IndexPath(item: offset, section: 0))
+        // FileItem's == and hash are identity, so these compare identity.
+        let oldSet = Set(previous), newSet = Set(items)
+        let orderKept = previous.lazy.filter { newSet.contains($0) }.elementsEqual(items.lazy.filter { oldSet.contains($0) })
+        if orderKept {
+            // The items that stay kept their order: the difference is just what
+            // left and what came (O(n), and the same as Myers' result).
+            for (offset, file) in previous.enumerated() where !newSet.contains(file) {
+                removed.insert(IndexPath(item: offset, section: 0))
             }
+            for (offset, file) in items.enumerated() where !oldSet.contains(file) {
+                inserted.insert(IndexPath(item: offset, section: 0))
+            }
+        } else if previous.count + items.count > 2000 {
+            // Items moved. Myers is O(n·d): too slow on the main thread for big lists.
+            reloadStrip(previous: previous, reset: false)
+            return
+        } else {
+            for change in items.difference(from: previous) {
+                switch change {
+                case let .remove(offset, _, _): removed.insert(IndexPath(item: offset, section: 0))
+                case let .insert(offset, _, _): inserted.insert(IndexPath(item: offset, section: 0))
+                }
+            }
+        }
+        if removed.count + inserted.count > 300 {
+            reloadStrip(previous: previous, reset: false)
+            return
         }
         if !removed.isEmpty || !inserted.isEmpty {
             strip.performBatchUpdates({

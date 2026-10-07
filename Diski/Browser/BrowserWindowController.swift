@@ -425,6 +425,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     /// The Back/Forward segmented group: the clicked segment is its selectedIndex.
     @objc func navigationClicked(_ sender: Any?) {
+        // From the toolbar's overflow menu the sender is the part (or its menu
+        // item), not the group, and the group's momentary selection is stale.
+        if let item = sender as? NSToolbarItem, !(item is NSToolbarItemGroup) {
+            if item === backItem { goBack(sender) } else if item === forwardItem { goForward(sender) }
+            return
+        }
+        if let menuItem = sender as? NSMenuItem {
+            if menuItem.title == "Back" { goBack(sender) } else if menuItem.title == "Forward" { goForward(sender) }
+            return
+        }
         let index = (sender as? NSToolbarItemGroup)?.selectedIndex ?? navigationGroup?.selectedIndex ?? -1
         if index == 0 { goBack(sender) } else if index == 1 { goForward(sender) }
     }
