@@ -16,7 +16,7 @@ Everything Finder does — and the things it should have done all along — with
   <img src="docs/screenshots/list.jpg" alt="Diski list view" width="900">
 </p>
 
-> **Alpha (0.1).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
+> **Alpha (0.1.2).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
 
 ## Install
 
