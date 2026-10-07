@@ -10,26 +10,57 @@ struct ItemMetadata {
     var whereFrom: String?
     var tags: [String] = []
 
-    /// Reads Spotlight metadata and tags. Call off the main thread.
+    /// The last lookup per path, so a revisited item shows its facts at once.
+    private final class Box {
+        let value: ItemMetadata
+        init(_ value: ItemMetadata) { self.value = value }
+    }
+
+    private static let cache: NSCache<NSString, Box> = {
+        let cache = NSCache<NSString, Box>()
+        cache.countLimit = 2000
+        return cache
+    }()
+
+    /// What the last `load` of `url` found, if it is still cached.
+    static func cached(_ url: URL) -> ItemMetadata? {
+        cache.object(forKey: url.path as NSString)?.value
+    }
+
+    /// Forgets cached facts, after tags or flags change.
+    static func invalidate(_ urls: [URL]) {
+        for url in urls { cache.removeObject(forKey: url.path as NSString) }
+    }
+
+    /// Reads Spotlight metadata and tags, and caches them. Call off the main thread.
     static func load(_ url: URL) -> ItemMetadata {
         var result = ItemMetadata()
         result.tags = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
-        guard let item = MDItemCreateWithURL(kCFAllocatorDefault, url as CFURL) else { return result }
-        result.lastOpened = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
-        if let width = MDItemCopyAttribute(item, kMDItemPixelWidth) as? Int,
-           let height = MDItemCopyAttribute(item, kMDItemPixelHeight) as? Int {
+        let key = url.path as NSString
+        guard let item = MDItemCreateWithURL(kCFAllocatorDefault, url as CFURL) else {
+            cache.setObject(Box(result), forKey: key)
+            return result
+        }
+        // Every attribute in one round trip to the metadata server.
+        let names: [CFString] = [kMDItemLastUsedDate, kMDItemPixelWidth, kMDItemPixelHeight,
+                                 kMDItemDurationSeconds, kMDItemVersion, kMDItemWhereFroms]
+        let attributes = (MDItemCopyAttributes(item, names as CFArray) as? [String: Any]) ?? [:]
+        result.lastOpened = attributes[kMDItemLastUsedDate as String] as? Date
+        if let width = attributes[kMDItemPixelWidth as String] as? Int,
+           let height = attributes[kMDItemPixelHeight as String] as? Int {
             result.dimensions = "\(width) × \(height)"
         }
-        if let seconds = MDItemCopyAttribute(item, kMDItemDurationSeconds) as? Double, seconds > 0 {
+        if let seconds = attributes[kMDItemDurationSeconds as String] as? Double, seconds > 0 {
             let total = Int(seconds.rounded())
             result.duration = total >= 3600
                 ? String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
                 : String(format: "%d:%02d", total / 60, total % 60)
         }
-        result.version = MDItemCopyAttribute(item, kMDItemVersion) as? String
-        if let origins = MDItemCopyAttribute(item, kMDItemWhereFroms) as? [String], let first = origins.first {
+        result.version = attributes[kMDItemVersion as String] as? String
+        if let origins = attributes[kMDItemWhereFroms as String] as? [String], let first = origins.first {
             result.whereFrom = first
         }
+        cache.setObject(Box(result), forKey: key)
         return result
     }
 
@@ -90,6 +121,7 @@ enum ItemAttributes {
     }
 
     static func reloadParents(of urls: [URL]) {
+        ItemMetadata.invalidate(urls)
         let parents = Set(urls.map { DirectoryReader.normalized($0.deletingLastPathComponent().path) })
         DirectoryStore.shared.reload(paths: parents)
     }

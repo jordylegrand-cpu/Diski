@@ -16,6 +16,7 @@ extension NSToolbarItem.Identifier {
     static let diskiTrash = NSToolbarItem.Identifier("app.diski.trash")
     static let diskiTerminal = NSToolbarItem.Identifier("app.diski.terminal")
     static let diskiGetInfo = NSToolbarItem.Identifier("app.diski.getinfo")
+    static let diskiPreview = NSToolbarItem.Identifier("app.diski.preview")
 }
 
 /// Holds one or two panes side by side.
@@ -38,7 +39,8 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: root.topAnchor),
+            // Below the toolbar: the dual-pane divider must not cut through it.
+            splitView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         view = root
@@ -58,6 +60,9 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
         pane.view.removeFromSuperview()
         pane.removeFromParent()
         panes.removeAll { $0 === pane }
+        // The remaining pane fills the container now, not at the next resize.
+        splitView.adjustSubviews()
+        sharedWidth = 0
     }
 
     func equalize() {
@@ -97,7 +102,7 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
 /// and the Liquid Glass toolbar.
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
                                      NSSearchFieldDelegate, NSSharingServicePickerToolbarItemDelegate,
-                                     NSMenuItemValidation, NSMenuDelegate, PaneViewControllerDelegate,
+                                     NSMenuItemValidation, NSToolbarItemValidation, NSMenuDelegate, PaneViewControllerDelegate,
                                      SidebarViewControllerDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     let splitController = NSSplitViewController()
     let sidebar = SidebarViewController()
@@ -107,6 +112,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var inspectorItem: NSSplitViewItem!
     private(set) var activePane: PaneViewController!
     private var firstResponderObservation: NSKeyValueObservation?
+    private var inspectorCollapseObservation: NSKeyValueObservation?
+    /// Column view shows the selected file in its own preview column, like
+    /// Finder's, so the preview pane steps aside while every pane is in it.
+    private var previewPaneHiddenForColumns = false
+    /// Whether the active pane's selection was empty at the last toolbar validation.
+    private var selectionWasEmpty = true
 
     private weak var navigationGroup: NSToolbarItemGroup?
     private weak var backItem: NSToolbarItem?
@@ -164,6 +175,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         paneContainer.add(pane)
         activePane = pane
         pane.isActive = true
+        updatePreviewPaneForColumnView()
+        // The split view's autosave also stores the preview pane's collapsed
+        // state, including a collapse that was only for column view. The
+        // setting decides; once now and once after the restore at first layout.
+        applyPreviewPaneSetting()
+        DispatchQueue.main.async { [weak self] in self?.applyPreviewPaneSetting() }
 
         let toolbar = NSToolbar(identifier: "DiskiBrowserToolbar")
         toolbar.delegate = self
@@ -183,10 +200,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         center.addObserver(self, selector: #selector(operationsChanged), name: FileOperationManager.didChange, object: nil)
         center.addObserver(self, selector: #selector(operationFinished(_:)), name: FileOperationManager.didFinish, object: nil)
         center.addObserver(self, selector: #selector(clearSearchField(_:)), name: .diskiClearSearchField, object: nil)
-        center.addObserver(self, selector: #selector(prefsChanged), name: Prefs.didChange, object: nil)
+        center.addObserver(self, selector: #selector(prefsChanged(_:)), name: Prefs.didChange, object: nil)
         updateWindowTitle()
         updateToolbarState()
         updateInspector()
+        // Revealing the preview pane by dragging its edge refreshes it too.
+        inspectorCollapseObservation = inspectorItem.observe(\.isCollapsed, options: [.new]) { [weak self] item, _ in
+            if !item.isCollapsed { self?.updateInspector(force: true) }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -220,6 +241,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebar.highlight(path: sidebarPath(for: pane))
         searchItem?.searchField.stringValue = pane.searchText
         ViewOptionsPanel.shared.paneDidChange(pane)
+        revalidateSelectionItems(force: true)
+    }
+
+    /// Share and the other selection-dependent items only revalidate on window
+    /// updates; a selection made without an event would leave them stale.
+    private func revalidateSelectionItems(force: Bool = false) {
+        let isEmpty = activePane.selectedItems.isEmpty
+        guard force || isEmpty != selectionWasEmpty else { return }
+        selectionWasEmpty = isEmpty
+        window?.toolbar?.validateVisibleItems()
     }
 
     var isDualPane: Bool { panes.count > 1 }
@@ -238,6 +269,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         for pane in panes { pane.showsActiveIndicator = panes.count > 1 }
         activePane.isActive = true
+        updatePreviewPaneForColumnView()
     }
 
     /// F5 / F6 in dual-pane mode: copy or move the selection to the other pane.
@@ -259,18 +291,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: - PaneViewControllerDelegate
 
     func paneDidChangeLocation(_ pane: PaneViewController) {
+        // Search results leave column view for the list without a mode callback.
+        updatePreviewPaneForColumnView()
         guard pane === activePane else { return }
         updateWindowTitle()
         updateToolbarState()
         updateInspector()
         sidebar.highlight(path: sidebarPath(for: pane))
         ViewOptionsPanel.shared.paneDidChange(pane)
+        // Navigation can clear the selection without a selection callback.
+        revalidateSelectionItems()
     }
 
     func paneDidChangeSelection(_ pane: PaneViewController) {
         guard pane === activePane else { return }
         updateInspector()
-        updateToolbarState()
+        revalidateSelectionItems()
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            panel.dataSource === self {
             previewItems = pane.selectedURLs
@@ -278,11 +314,29 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
     }
 
+    /// Every view-mode change is followed by paneDidChangeLocation, which
+    /// updates the toolbar and the preview pane.
     func paneDidChangeViewMode(_ pane: PaneViewController) {
+        updatePreviewPaneForColumnView()
         guard pane === activePane else { return }
-        updateToolbarState()
-        updateInspector()
         ViewOptionsPanel.shared.paneDidChange(pane)
+    }
+
+    /// Hides the preview pane when every pane enters column view and brings
+    /// it back (if it is on) when one leaves. Only acts on that change, and
+    /// never on a focus switch, so the panes don't jump. No animation: it
+    /// lands together with the new view.
+    private func updatePreviewPaneForColumnView() {
+        let hide = panes.allSatisfy { $0.viewMode == .columns }
+        guard hide != previewPaneHiddenForColumns else { return }
+        previewPaneHiddenForColumns = hide
+        let collapse = hide || !Prefs.showInspector
+        if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
+    }
+
+    private func applyPreviewPaneSetting() {
+        let collapse = previewPaneHiddenForColumns || !Prefs.showInspector
+        if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
     }
 
     func paneRequestsFocusSwitch(_ pane: PaneViewController) -> Bool {
@@ -301,11 +355,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func paneRequestsInspector(_ pane: PaneViewController) {
+        updateInspector(force: true)
         if inspectorItem.isCollapsed {
             inspectorItem.animator().isCollapsed = false
             Prefs.showInspector = true
         }
-        updateInspector()
     }
 
     // MARK: - Sidebar
@@ -340,18 +394,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     private func updateWindowTitle() {
         guard let window else { return }
-        window.title = activePane.displayTitle
-        let name = activePane.isSearchResults ? activePane.displayTitle : FileManager.default.displayName(atPath: activePane.displayedPath)
-        window.tab.title = name
+        let title = activePane.displayTitle
+        if window.title != title { window.title = title }
+        let name = activePane.isSearchResults ? title : FileManager.default.displayName(atPath: activePane.displayedPath)
+        if window.tab.title != name { window.tab.title = name }
     }
 
+    /// Writes only what changed: this runs on every navigation.
     private func updateToolbarState() {
-        backItem?.isEnabled = activePane.canGoBack
-        forwardItem?.isEnabled = activePane.canGoForward
-        viewModeGroup?.selectedIndex = activePane.viewMode.rawValue
+        let back = activePane.canGoBack, forward = activePane.canGoForward
+        if backItem?.isEnabled != back { backItem?.isEnabled = back }
+        if forwardItem?.isEnabled != forward { forwardItem?.isEnabled = forward }
+        let mode = activePane.viewMode.rawValue
+        if let group = viewModeGroup, group.selectedIndex != mode { group.selectedIndex = mode }
     }
 
-    private func updateInspector() {
+    /// Skipped while the preview pane is collapsed; every reveal path forces it.
+    private func updateInspector(force: Bool = false) {
+        guard force || !inspectorItem.isCollapsed else { return }
         inspector.compact = activePane.viewMode == .gallery
         let selection = activePane.selectedItems
         if selection.isEmpty {
@@ -361,7 +421,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
     }
 
-    @objc private func prefsChanged() {
+    @objc private func prefsChanged(_ notification: Notification) {
+        // Only the full-path setting changes the window title.
+        let key = notification.userInfo?[Prefs.changedKey] as? String
+        guard key == nil || key == "showFullPathInTitle" else { return }
         updateWindowTitle()
     }
 
@@ -370,19 +433,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     @objc func goBack(_ sender: Any?) { activePane.goBack(sender); activePane.content.focus() }
     @objc func goForward(_ sender: Any?) { activePane.goForward(sender); activePane.content.focus() }
 
+    /// The Back/Forward segmented group: the clicked segment is its selectedIndex.
+    @objc func navigationClicked(_ sender: Any?) {
+        // From the toolbar's overflow menu the sender is the part (or its menu
+        // item), not the group, and the group's momentary selection is stale.
+        if let item = sender as? NSToolbarItem, !(item is NSToolbarItemGroup) {
+            if item === backItem { goBack(sender) } else if item === forwardItem { goForward(sender) }
+            return
+        }
+        if let menuItem = sender as? NSMenuItem {
+            if menuItem.title == "Back" { goBack(sender) } else if menuItem.title == "Forward" { goForward(sender) }
+            return
+        }
+        let index = (sender as? NSToolbarItemGroup)?.selectedIndex ?? navigationGroup?.selectedIndex ?? -1
+        if index == 0 { goBack(sender) } else if index == 1 { goForward(sender) }
+    }
+
     @objc func toolbarViewModeChanged(_ sender: Any?) {
         guard let group = sender as? NSToolbarItemGroup, let mode = ViewMode(rawValue: group.selectedIndex) else { return }
         activePane.setViewMode(mode)
     }
 
-    @objc func toggleInspector(_ sender: Any?) {
+    /// Not `toggleInspector(_:)`: NSSplitViewController implements that and sits
+    /// earlier in the responder chain, but the preview pane is a sidebar item.
+    @objc func togglePreviewPane(_ sender: Any?) {
         let collapse = !inspectorItem.isCollapsed
+        // Fill the pane before it slides in, not halfway through the animation.
+        if !collapse { updateInspector(force: true) }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
             inspectorItem.animator().isCollapsed = collapse
         }
-        Prefs.showInspector = !collapse
-        if !collapse { updateInspector() }
+        // In column view the pane is only shown for now; the setting stays as it is.
+        if !previewPaneHiddenForColumns { Prefs.showInspector = !collapse }
     }
 
     @objc func togglePathBar(_ sender: Any?) {
@@ -544,7 +627,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         switch menuItem.action {
         case #selector(goBack(_:)): return activePane.canGoBack
         case #selector(goForward(_:)): return activePane.canGoForward
-        case #selector(toggleInspector(_:)):
+        case #selector(togglePreviewPane(_:)):
             menuItem.title = inspectorItem.isCollapsed ? "Show Preview" : "Hide Preview"
             return true
         case #selector(togglePathBar(_:)):
@@ -564,6 +647,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         default:
             return true
         }
+    }
+
+    /// Items targeting the window controller would otherwise be enabled on every
+    /// window update simply because it responds to their action.
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        guard let pane = activePane else { return false }
+        if item === backItem || item.action == #selector(goBack(_:)) { return pane.canGoBack }
+        if item === forwardItem || item.action == #selector(goForward(_:)) { return pane.canGoForward }
+        return true
     }
 
     /// Unhandled actions (e.g. while the sidebar has focus) go to the active pane.
@@ -599,7 +691,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.sidebarTrackingSeparator, .diskiNavigation, .diskiOperations, .diskiAirDrop, .diskiViewMode,
          .diskiGroup, .diskiShare, .diskiTags, .diskiAction, .diskiSearch, .diskiDualPane, .diskiNewFolder,
-         .diskiTrash, .diskiTerminal, .diskiGetInfo, .toggleInspector, .flexibleSpace, .space]
+         .diskiTrash, .diskiTerminal, .diskiGetInfo, .diskiPreview, .flexibleSpace, .space]
     }
 
     private func symbol(_ names: String..., label: String) -> NSImage? {
@@ -626,19 +718,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
         case .diskiNavigation:
-            let back = button(NSToolbarItem.Identifier("app.diski.back"), label: "Back",
-                              symbol: symbol("chevron.left", label: "Back"), action: #selector(goBack(_:)), target: self)
-            let forward = button(NSToolbarItem.Identifier("app.diski.forward"), label: "Forward",
-                                 symbol: symbol("chevron.right", label: "Forward"), action: #selector(goForward(_:)), target: self)
-            let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier)
-            group.subitems = [back, forward]
+            // Finder's native segmented capsule (with the centre divider), not two
+            // separate bordered buttons.
+            let images = [symbol("chevron.left", label: "Back"), symbol("chevron.right", label: "Forward")].compactMap { $0 }
+            let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier, images: images, selectionMode: .momentary,
+                                           labels: ["Back", "Forward"], target: self, action: #selector(navigationClicked(_:)))
             group.label = "Back/Forward"
             group.paletteLabel = "Back/Forward"
             group.isNavigational = true
             group.controlRepresentation = .expanded
-            backItem = back
-            forwardItem = forward
-            navigationGroup = group
+            // The segments' state comes from updateToolbarState() alone: a
+            // validation pass on the group must not overwrite it.
+            group.autovalidates = false
+            let parts = group.subitems
+            if parts.count == 2 {
+                parts[0].toolTip = "Back"
+                parts[1].toolTip = "Forward"
+                parts.forEach { $0.autovalidates = false }
+                parts[0].isEnabled = activePane?.canGoBack ?? false
+                parts[1].isEnabled = activePane?.canGoForward ?? false
+                // The customization palette gets its own copy; keep the live one.
+                if flag {
+                    backItem = parts[0]
+                    forwardItem = parts[1]
+                }
+            }
+            if flag { navigationGroup = group }
             return group
 
         case .diskiAirDrop:
@@ -742,6 +847,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case .diskiGetInfo:
             return button(itemIdentifier, label: "Get Info", symbol: symbol("info.circle", label: "Get Info"),
                           action: #selector(PaneViewController.getInfo(_:)))
+        case .diskiPreview:
+            return button(itemIdentifier, label: "Preview", symbol: symbol("sidebar.trailing", "sidebar.right", label: "Preview"),
+                          action: #selector(togglePreviewPane(_:)), target: self)
         default:
             return nil
         }
@@ -758,13 +866,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let pane = activePane else { return }
         switch menu.identifier?.rawValue {
         case "sortMenu":
-            menu.addItem(withTitle: "Sort By", action: nil, keyEquivalent: "").isEnabled = false
+            menu.addItem(NSMenuItem.sectionHeader(title: "Sort By"))
             for key in SortKey.allCases {
                 let entry = NSMenuItem(title: key.title, action: #selector(PaneViewController.sortBy(_:)), keyEquivalent: "")
                 entry.representedObject = key.rawValue
                 entry.target = pane
                 entry.state = key == pane.arrangeOptions.sortKey ? .on : .off
-                entry.indentationLevel = 1
                 menu.addItem(entry)
             }
             menu.addItem(.separator())
@@ -781,13 +888,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             sizes.state = Prefs.calculateFolderSizes ? .on : .off
             menu.addItem(sizes)
             menu.addItem(.separator())
-            menu.addItem(withTitle: "Row Size", action: nil, keyEquivalent: "").isEnabled = false
+            menu.addItem(NSMenuItem.sectionHeader(title: "Row Size"))
             for density in RowDensity.allCases {
                 let entry = NSMenuItem(title: density.title, action: #selector(setRowDensity(_:)), keyEquivalent: "")
                 entry.tag = density.rawValue
                 entry.target = self
                 entry.state = density == Prefs.rowDensity ? .on : .off
-                entry.indentationLevel = 1
                 menu.addItem(entry)
             }
         case "tagsMenu":

@@ -2,6 +2,8 @@ import AppKit
 
 struct VolumeInfo: Hashable {
     let url: URL
+    /// `url.path`, stored: volume lookups compare it for every title and menu update.
+    let path: String
     let name: String
     let isRoot: Bool
     let isInternal: Bool
@@ -11,7 +13,6 @@ struct VolumeInfo: Hashable {
     let totalCapacity: Int64
     let availableCapacity: Int64
 
-    var path: String { url.path }
     var usedFraction: Double {
         guard totalCapacity > 0 else { return 0 }
         return 1 - Double(availableCapacity) / Double(totalCapacity)
@@ -22,14 +23,27 @@ struct VolumeInfo: Hashable {
 final class VolumeMonitor {
     static let shared = VolumeMonitor()
     static let didChange = Notification.Name("DiskiVolumesDidChange")
+    /// Posted on the main thread when a value of `cachedAvailableCapacity` changed.
+    static let capacityDidChange = Notification.Name("DiskiVolumeCapacityDidChange")
 
     private(set) var volumes: [VolumeInfo] = []
     private var observers: [NSObjectProtocol] = []
 
+    private struct Capacity {
+        var bytes: Int64
+        var readAt: Date
+    }
+    /// Finder's free space per mount point, read in the background.
+    private var capacities: [String: Capacity] = [:]
+    private var capacityReads = Set<String>()
+    private let capacityQueue = DispatchQueue(label: "app.diski.volumes", qos: .utility)
+
+    /// Statfs-fast keys only: the purgeable-space key ("important usage") asks
+    /// the system to size its caches, which takes up to hundreds of ms per volume.
     private static let keys: [URLResourceKey] = [
         .volumeLocalizedNameKey, .volumeNameKey, .volumeIsRootFileSystemKey, .volumeIsInternalKey,
         .volumeIsEjectableKey, .volumeIsRemovableKey, .volumeIsLocalKey, .volumeIsBrowsableKey,
-        .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
+        .volumeTotalCapacityKey, .volumeAvailableCapacityKey,
     ]
 
     private init() {
@@ -41,6 +55,8 @@ final class VolumeMonitor {
                 self?.refresh()
             })
         }
+        // Usually ready by the time the first status bar draws.
+        _ = cachedAvailableCapacity(forPath: "/")
     }
 
     func refresh() {
@@ -69,9 +85,8 @@ final class VolumeMonitor {
         let isRoot = values.volumeIsRootFileSystem ?? (url.path == "/")
         let name = values.volumeLocalizedName ?? values.volumeName ?? url.lastPathComponent
         let total = Int64(values.volumeTotalCapacity ?? 0)
-        var available = values.volumeAvailableCapacityForImportantUsage ?? 0
-        if available <= 0 { available = Int64(values.volumeAvailableCapacity ?? 0) }
-        return VolumeInfo(url: url, name: name, isRoot: isRoot,
+        let available = Int64(values.volumeAvailableCapacity ?? 0)
+        return VolumeInfo(url: url, path: url.path, name: name, isRoot: isRoot,
                           isInternal: values.volumeIsInternal ?? isRoot,
                           isEjectable: values.volumeIsEjectable ?? false,
                           isRemovable: values.volumeIsRemovable ?? false,
@@ -82,16 +97,53 @@ final class VolumeMonitor {
     /// The volume containing `path` (longest mount-point prefix).
     func volume(containing path: String) -> VolumeInfo? {
         var best: VolumeInfo?
+        var bestLength = -1
         for volume in volumes {
             let mount = volume.path
             if mount == "/" || path == mount || path.hasPrefix(mount + "/") {
-                if best == nil || mount.count > best!.path.count { best = volume }
+                let length = mount.utf8.count
+                if length > bestLength {
+                    best = volume
+                    bestLength = length
+                }
             }
         }
         return best
     }
 
-    /// Free space for the volume holding `path` (fresh value, not cached).
+    /// Finder's free space (purgeable space included) for the volume holding
+    /// `path`: the last known value at once (nil until the first read lands),
+    /// refreshed in the background when older than `maxAge`. Posts
+    /// `capacityDidChange` when a read changes it. Main thread only.
+    func cachedAvailableCapacity(forPath path: String, maxAge: TimeInterval = 10) -> Int64? {
+        let mount = volume(containing: path)?.path ?? "/"
+        let known = capacities[mount]
+        let fresh = known.map { Date().timeIntervalSince($0.readAt) <= maxAge } ?? false
+        if !fresh && !capacityReads.contains(mount) {
+            capacityReads.insert(mount)
+            capacityQueue.async { [weak self] in
+                let bytes = VolumeMonitor.availableCapacity(forPath: mount)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.capacityReads.remove(mount)
+                    guard let bytes else { return }
+                    let changed = self.capacities[mount]?.bytes != bytes
+                    self.capacities[mount] = Capacity(bytes: bytes, readAt: Date())
+                    if changed { NotificationCenter.default.post(name: VolumeMonitor.capacityDidChange, object: self) }
+                }
+            }
+        }
+        return known?.bytes
+    }
+
+    /// Marks every known free-space value as old (after copies, moves and
+    /// deletions); the next `cachedAvailableCapacity` call re-reads it.
+    func invalidateCapacities() {
+        capacities = capacities.mapValues { Capacity(bytes: $0.bytes, readAt: .distantPast) }
+    }
+
+    /// Free space for the volume holding `path` (fresh value, not cached; slow:
+    /// call it off the main thread).
     static func availableCapacity(forPath path: String) -> Int64? {
         let url = URL(fileURLWithPath: path)
         guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey,

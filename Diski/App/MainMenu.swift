@@ -68,7 +68,7 @@ enum MainMenu {
         add(file, "Add to Sidebar", #selector(PaneViewController.addToSidebar(_:)), "t", [.command, .control])
         file.addItem(.separator())
         add(file, "Move to Trash", #selector(PaneViewController.moveToTrash(_:)), "\u{8}")
-        add(file, "Delete Immediately…", #selector(PaneViewController.deleteImmediately(_:)), "\u{8}", [.command, .option])
+        add(file, "Delete Immediately…", #selector(PaneViewController.deleteImmediately(_:)), "\u{8}", [.command, .option]).isAlternate = true
         add(file, "Put Back", #selector(PaneViewController.putBackSelection(_:)))
         add(file, "Eject", #selector(PaneViewController.eject(_:)), "e")
         file.addItem(.separator())
@@ -89,10 +89,12 @@ enum MainMenu {
         add(edit, "Redo", Selector(("redo:")), "z", [.command, .shift])
         edit.addItem(.separator())
         add(edit, "Cut", #selector(PaneViewController.cut(_:)), "x")
+        // Like Finder, the ⌥ variants replace their primary only while ⌥ is held.
+        // Each alternate must directly follow its primary.
         add(edit, "Copy", #selector(PaneViewController.copy(_:)), "c")
+        add(edit, "Copy Path", #selector(PaneViewController.copyPath(_:)), "c", [.command, .option]).isAlternate = true
         add(edit, "Paste", #selector(PaneViewController.paste(_:)), "v")
-        add(edit, "Move Item Here", #selector(PaneViewController.moveItemHere(_:)), "v", [.command, .option])
-        add(edit, "Copy Path", #selector(PaneViewController.copyPath(_:)), "c", [.command, .option])
+        add(edit, "Move Item Here", #selector(PaneViewController.moveItemHere(_:)), "v", [.command, .option]).isAlternate = true
         add(edit, "Select All", #selector(NSText.selectAll(_:)), "a")
         edit.addItem(.separator())
         add(edit, "Empty Trash…", #selector(PaneViewController.emptyTrash(_:)), "\u{8}", [.command, .shift])
@@ -119,8 +121,8 @@ enum MainMenu {
         view.addItem(.separator())
         add(view, "Show Tab Bar", #selector(NSWindow.toggleTabBar(_:)), "t", [.command, .shift])
         add(view, "Show All Tabs", #selector(NSWindow.toggleTabOverview(_:)), "\\", [.command, .shift])
-        add(view, "Hide Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .option])
-        add(view, "Hide Preview", #selector(BrowserWindowController.toggleInspector(_:)), "p", [.command, .shift])
+        add(view, "Hide Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control])
+        add(view, "Hide Preview", #selector(BrowserWindowController.togglePreviewPane(_:)), "p", [.command, .shift])
         add(view, "Hide Path Bar", #selector(BrowserWindowController.togglePathBar(_:)), "p", [.command, .option])
         add(view, "Hide Item Info", #selector(BrowserWindowController.toggleStatusInfo(_:)), "/")
         view.addItem(.separator())
@@ -128,6 +130,8 @@ enum MainMenu {
         add(view, "Copy to Other Pane", #selector(BrowserWindowController.copyToOtherPane(_:)), key(NSF5FunctionKey), [])
         add(view, "Move to Other Pane", #selector(BrowserWindowController.moveToOtherPane(_:)), key(NSF6FunctionKey), [])
         view.addItem(.separator())
+        // NSWindow validates this item and switches it between Show and Hide.
+        add(view, "Hide Toolbar", #selector(NSWindow.toggleToolbarShown(_:)), "t", [.command, .option])
         add(view, "Customize Toolbar…", #selector(NSWindow.runToolbarCustomizationPalette(_:)))
         main.addItem(submenu(view))
 

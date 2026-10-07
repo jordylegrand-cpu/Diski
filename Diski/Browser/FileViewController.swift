@@ -47,16 +47,29 @@ class FileViewController: NSViewController {
 /// icon immediately, then the item's own icon or a Quick Look thumbnail.
 final class ItemImageLoader {
     private(set) weak var item: FileItem?
+    private weak var imageView: NSImageView?
     private var thumbnailToken: String?
+    /// What was last loaded: reconfiguring a cell for the same, unchanged item
+    /// (folder sizes arriving, a rearrange) keeps its thumbnail or the request
+    /// in flight instead of restarting it and flashing back to the type icon.
+    private var loadedKey: (modified: Double, size: Int64, points: CGFloat, thumbnails: Bool, iconMode: Bool)?
+    private var showsThumbnail = false
 
-    func load(_ item: FileItem, into imageView: NSImageView, points: CGFloat, thumbnails: Bool) {
+    /// `iconMode`: Quick Look's decorated thumbnail (rounded, inset, shadowed), as
+    /// Finder shows files in its list, column and icon views; big previews stay plain.
+    func load(_ item: FileItem, into imageView: NSImageView, points: CGFloat, thumbnails: Bool, iconMode: Bool = false) {
+        if item === self.item, imageView === self.imageView, let k = loadedKey,
+           k.modified == item.modified, k.size == item.size, k.points == points, k.thumbnails == thumbnails,
+           k.iconMode == iconMode, thumbnailToken != nil || showsThumbnail { return }
         cancel()
         self.item = item
-        if thumbnails, FileKinds.wantsThumbnail(item) {
-            if let cached = ThumbnailCache.shared.cached(for: item, points: points) {
-                imageView.image = cached
-                return
-            }
+        self.imageView = imageView
+        loadedKey = (modified: item.modified, size: item.size, points: points, thumbnails: thumbnails, iconMode: iconMode)
+        let wantsThumbnail = thumbnails && FileKinds.wantsThumbnail(item)
+        if wantsThumbnail, let cached = ThumbnailCache.shared.cached(for: item, points: points, iconMode: iconMode) {
+            imageView.image = cached
+            showsThumbnail = true
+            return
         }
         if let icon = IconCache.shared.cachedItemIcon(path: item.path) {
             imageView.image = icon
@@ -64,16 +77,21 @@ final class ItemImageLoader {
             imageView.image = IconCache.shared.immediateIcon(for: item)
             if IconCache.shared.needsItemIcon(item) {
                 IconCache.shared.loadItemIcon(for: item) { [weak self, weak imageView] icon in
-                    guard let self, self.item === item else { return }
+                    // A thumbnail that arrived first wins over the item's icon.
+                    guard let self, self.item === item, !self.showsThumbnail else { return }
                     imageView?.image = icon
                 }
             }
         }
-        if thumbnails, FileKinds.wantsThumbnail(item), !ThumbnailCache.shared.hasFailed(item, points: points) {
+        // request() answers failed keys at once (with nil), so no separate check.
+        if wantsThumbnail {
             let scale = imageView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-            thumbnailToken = ThumbnailCache.shared.request(for: item, points: points, scale: scale) { [weak self, weak imageView] image in
-                guard let self, self.item === item, let image else { return }
+            thumbnailToken = ThumbnailCache.shared.request(for: item, points: points, scale: scale,
+                                                           iconMode: iconMode) { [weak self, weak imageView] image in
+                guard let self, self.item === item else { return }
                 self.thumbnailToken = nil
+                guard let image else { return }
+                self.showsThumbnail = true
                 imageView?.image = image
             }
         }
@@ -85,6 +103,8 @@ final class ItemImageLoader {
             thumbnailToken = nil
         }
         item = nil
+        loadedKey = nil
+        showsThumbnail = false
     }
 }
 
@@ -118,7 +138,9 @@ enum TagColors {
 final class TagDotView: NSView {
     var colors: [NSColor] = [] {
         didSet {
+            // Before the guard: a fresh view whose first value is [] must still hide.
             isHidden = colors.isEmpty
+            guard colors != oldValue else { return }
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -129,14 +151,19 @@ final class TagDotView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        for (i, color) in colors.enumerated().reversed() {
-            let rect = NSRect(x: CGFloat(i) * 5 + 0.5, y: (bounds.height - 9) / 2, width: 9, height: 9)
-            let path = NSBezierPath(ovalIn: rect)
-            color.setFill()
-            path.fill()
-            NSColor.windowBackgroundColor.withAlphaComponent(0.9).setStroke()
-            path.lineWidth = 1
-            path.stroke()
+        // Flat dots, no outline; the 9 pt dot is centred in its 10 pt frame.
+        let d: CGFloat = 9, step: CGFloat = 5, y = (bounds.height - d) / 2
+        for i in stride(from: colors.count - 1, through: 0, by: -1) {
+            NSGraphicsContext.saveGraphicsState()
+            if i > 0 { // 1 pt gap where the dot in front overlaps: shows the real row background, no outline
+                let clip = NSBezierPath(rect: bounds)
+                clip.append(NSBezierPath(ovalIn: NSRect(x: CGFloat(i - 1) * step + 0.5, y: y, width: d, height: d).insetBy(dx: -1, dy: -1)))
+                clip.windingRule = .evenOdd
+                clip.addClip()
+            }
+            colors[i].setFill()
+            NSBezierPath(ovalIn: NSRect(x: CGFloat(i) * step + 0.5, y: y, width: d, height: d)).fill()
+            NSGraphicsContext.restoreGraphicsState()
         }
     }
 }

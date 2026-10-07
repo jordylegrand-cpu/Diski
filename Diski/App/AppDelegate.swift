@@ -27,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Opens Finder's "Copy" window by itself for operations that take a while.
         _ = ProgressWindowController.shared
         NSApp.servicesProvider = self
-        NSUpdateDynamicServices()
         _ = VolumeMonitor.shared
         dayObserver = NotificationCenter.default.addObserver(forName: .NSCalendarDayChanged, object: nil, queue: .main) { _ in
             Formatters.refreshDayBoundaries()
@@ -44,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         CIDriver.run(app: self)
         NSApp.activate()
+        // Registers the Services entries without holding up the first window (an IPC to pbs).
+        DispatchQueue.main.async { NSUpdateDynamicServices() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -263,7 +264,8 @@ enum ShortcutsWindow {
             ("⇧⌘.", "Show hidden files"),
             ("⌘\\", "Dual pane · F5 copy · F6 move to other pane"),
             ("Tab", "Switch pane"),
-            ("⇧⌘P / ⌥⌘P / ⌥⌘S", "Preview / Path bar / Sidebar"),
+            ("⇧⌘P / ⌥⌘P / ⌃⌘S", "Preview / Path bar / Sidebar"),
+            ("⌥⌘T", "Show / hide toolbar"),
             ("⌘T / ⌘N", "New tab / New window"),
         ]),
     ]
@@ -301,6 +303,9 @@ enum ShortcutsWindow {
             window.contentView = stack
             window.title = "Diski Keyboard Shortcuts"
             window.isReleasedWhenClosed = false
+            // Not a browser tab, and no line under the title bar (nothing scrolls under it).
+            window.tabbingMode = .disallowed
+            window.titlebarSeparatorStyle = .none
             window.center()
             self.window = window
         }

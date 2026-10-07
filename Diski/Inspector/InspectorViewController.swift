@@ -3,63 +3,77 @@ import AppKit
 struct InfoRow: Equatable {
     let label: String
     let value: String
+    /// A date's medium form ("Sep 20, 2026 at 8:17 PM"), shown when the long
+    /// one in `value` doesn't fit.
+    var compactValue: String? = nil
 }
 
-/// One "label … value" line of the preview pane's Information section, with
-/// a hairline above it like Finder's.
+/// One label/value line of the preview pane's Information section.
 final class InspectorRowView: NSView {
     private let label = NSTextField(labelWithString: "")
     private let value = NSTextField(labelWithString: "")
-    private let line = HairlineView()
 
-    init(_ row: InfoRow, separator: Bool) {
-        super.init(frame: .zero)
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         for field in [label, value] {
             field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             field.translatesAutoresizingMaskIntoConstraints = false
             addSubview(field)
         }
-        label.stringValue = row.label
         label.textColor = .secondaryLabelColor
         label.setContentHuggingPriority(.required, for: .horizontal)
-        value.stringValue = row.value
         value.alignment = .right
-        value.isSelectable = true
-        let multiline = row.label == "Where" || row.label == "Where from"
-        value.maximumNumberOfLines = multiline ? 3 : 1
-        value.lineBreakMode = multiline ? .byCharWrapping : .byTruncatingMiddle
-        value.cell?.truncatesLastVisibleLine = true
+        value.maximumNumberOfLines = 1
+        value.allowsExpansionToolTips = true
         // Below the split view's holding priority: long values truncate
         // instead of widening the pane.
         value.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(210), for: .horizontal)
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.isHidden = !separator
-        addSubview(line)
         NSLayoutConstraint.activate([
-            line.leadingAnchor.constraint(equalTo: leadingAnchor),
-            line.trailingAnchor.constraint(equalTo: trailingAnchor),
-            line.topAnchor.constraint(equalTo: topAnchor),
-            line.heightAnchor.constraint(equalToConstant: 1),
             label.leadingAnchor.constraint(equalTo: leadingAnchor),
             label.firstBaselineAnchor.constraint(equalTo: value.firstBaselineAnchor),
             value.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 10),
             value.trailingAnchor.constraint(equalTo: trailingAnchor),
-            value.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            value.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3.5),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 21.5),
+            // One line each, 23 pt apart: Finder's row pitch.
+            value.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 16),
+            heightAnchor.constraint(equalToConstant: 23),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Rows are reused; unchanged strings aren't set again.
+    func configure(_ row: InfoRow, text: String) {
+        if label.stringValue != row.label { label.stringValue = row.label }
+        if value.stringValue != text { value.stringValue = text }
+        // A path keeps its enclosing folder; anything else (a download's host
+        // and file name) keeps both ends.
+        let mode: NSLineBreakMode = row.label == "Where" ? .byTruncatingHead : .byTruncatingMiddle
+        if value.lineBreakMode != mode { value.lineBreakMode = mode }
+    }
 }
 
 /// The preview pane (Finder's "Show Preview"): big preview, name, kind and
 /// size, the Information section, tags and More…. Plain AppKit on the
 /// split view's native inspector pane.
 final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
+    /// Leading and trailing content inset, Finder's.
+    private static let inset: CGFloat = 10
+    /// Spotlight lookups and tag writes: one at a time, in order.
+    private static let metadataQueue = DispatchQueue(label: "app.diski.inspector.metadata", qos: .userInitiated)
+    private static let fullDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long
+        f.timeStyle = .short
+        return f
+    }()
+    private static let rowFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+
     private var token = 0
     private var currentKey = ""
+    /// What was asked for while the pane couldn't be seen; shown once it can.
+    private var pending: (items: [FileItem], folderPath: String?)?
+    private var metadataWork: DispatchWorkItem?
     /// The folder whose size is shown; recalculated when its contents change.
     private var sizedFolder: (item: FileItem, kind: String)?
     private var sizeRefreshScheduled = false
@@ -68,6 +82,17 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     private var rows: [InfoRow] = []
     private var moreRows: [InfoRow] = []
     private var showsMore = false
+    /// Row views, reused; the ones in `rowsStack` are always a prefix.
+    private var rowViews: [InspectorRowView] = []
+    private var shownRows: [InfoRow] = []
+    private var shownFullDates = false
+    /// Whether the date rows show the long form. One choice for all of them, like Finder.
+    private var fullDates = false
+    /// The rows `longDatesWidth` was measured for.
+    private var measuredRows: [InfoRow] = []
+    /// The narrowest Information width that fits every date row's long form.
+    private var longDatesWidth: CGFloat = 0
+    private var dateWidth: CGFloat = -1
 
     private let scrollView = NSScrollView()
     private let stack = NSStackView()
@@ -102,7 +127,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 224, height: 600))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 600))
 
         preview.imageScaling = .scaleProportionallyUpOrDown
         preview.translatesAutoresizingMaskIntoConstraints = false
@@ -118,15 +143,17 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
+        titleLabel.allowsExpansionToolTips = true
         subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.textColor = .tertiaryLabelColor
         subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
+        subtitleLabel.allowsExpansionToolTips = true
 
         compactPreview.imageScaling = .scaleProportionallyUpOrDown
         compactPreview.translatesAutoresizingMaskIntoConstraints = false
-        compactPreview.widthAnchor.constraint(equalToConstant: 40).isActive = true
-        compactPreview.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        compactPreview.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        compactPreview.heightAnchor.constraint(equalToConstant: 48).isActive = true
         compactHeader.orientation = .horizontal
         compactHeader.spacing = 10
         compactHeader.alignment = .centerY
@@ -134,9 +161,11 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
         rowsStack.spacing = 0
+        // Its width picks the date length (rowsFrameDidChange).
+        rowsStack.postsFrameChangedNotifications = true
 
         tagField.placeholderString = "Add Tags…"
-        tagField.font = .systemFont(ofSize: 12)
+        tagField.font = .systemFont(ofSize: NSFont.systemFontSize)
         tagField.isBordered = false
         tagField.drawsBackground = false
         tagField.focusRingType = .none
@@ -144,26 +173,29 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         tagField.delegate = self
         tagField.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         (tagField.cell as? NSTokenFieldCell)?.placeholderAttributedString = NSAttributedString(
-            string: "Add Tags…", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.tertiaryLabelColor])
+            string: "Add Tags…", attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                                             .foregroundColor: NSColor.tertiaryLabelColor])
 
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 16, right: 9)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: Self.inset, bottom: 16, right: Self.inset)
         stack.translatesAutoresizingMaskIntoConstraints = false
         for view in [previewBox, compactHeader, titleLabel, subtitleLabel, infoHeader, rowsStack, tagsHeader, tagField] as [NSView] {
             stack.addArrangedSubview(view)
         }
         for view in [previewBox, rowsStack, tagField, titleLabel, subtitleLabel] as [NSView] {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * Self.inset).isActive = true
         }
-        // Finder's spacing, measured.
+        // Finder's rhythm, baseline to baseline: title → subtitle 19 pt,
+        // subtitle → Information 25, Information → first row 22, rows 23
+        // apart, last row → Tags 32, Tags → Add Tags… 22.
         stack.setCustomSpacing(15, after: previewBox)
-        stack.setCustomSpacing(2, after: titleLabel)
-        stack.setCustomSpacing(7, after: subtitleLabel)
+        stack.setCustomSpacing(3, after: titleLabel)
+        stack.setCustomSpacing(9, after: subtitleLabel)
         stack.setCustomSpacing(3, after: infoHeader)
-        stack.setCustomSpacing(11, after: rowsStack)
-        stack.setCustomSpacing(4.5, after: tagsHeader)
+        stack.setCustomSpacing(12, after: rowsStack)
+        stack.setCustomSpacing(6, after: tagsHeader)
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -177,7 +209,8 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
 
         moreButton.isBordered = false
         moreButton.imagePosition = .imageAbove
-        moreButton.imageHugsTitle = true
+        // The symbol at the top edge, the title in the space below it.
+        moreButton.imageHugsTitle = false
         moreButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         moreButton.contentTintColor = .secondaryLabelColor
         moreButton.target = self
@@ -213,9 +246,13 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: moreButton.topAnchor, constant: -6),
             moreButton.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            moreButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            // Finder: 28 pt from the circle's centre to the title's baseline,
+            // which sits 18 pt above the bottom.
+            moreButton.heightAnchor.constraint(equalToConstant: 48),
+            moreButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6),
             emptyLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            // Centred in the visible area, not under the toolbar.
+            emptyLabel.centerYAnchor.constraint(equalTo: root.safeAreaLayoutGuide.centerYAnchor),
         ])
         view = root
         applyCompactLayout()
@@ -226,6 +263,8 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
                            name: DirectoryStore.folderContentsDidChange, object: nil)
         center.addObserver(self, selector: #selector(directoryDidUpdate(_:)),
                            name: DirectoryStore.didUpdate, object: nil)
+        center.addObserver(self, selector: #selector(rowsFrameDidChange(_:)),
+                           name: NSView.frameDidChangeNotification, object: rowsStack)
     }
 
     deinit {
@@ -237,6 +276,14 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         // The preview area is a bit taller than wide, like Finder's.
         let height = compact ? 0 : min(320, max(160, (view.bounds.width * 1.27).rounded()))
         if previewHeight.constant != height { previewHeight.constant = height }
+        // The pane has just appeared: show what was asked for while it was hidden.
+        // Async, so the rows aren't rebuilt in the middle of this layout pass.
+        if pending != nil, view.window != nil, view.bounds.width > 1, !view.isHiddenOrHasHiddenAncestor {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let request = self.pending else { return }
+                self.show(items: request.items, folderPath: request.folderPath)
+            }
+        }
     }
 
     private func applyCompactLayout() {
@@ -244,20 +291,20 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         compactHeader.isHidden = !compact
         if compact {
             compactHeader.setViews([compactPreview, verticalTitles()], in: .leading)
-            stack.edgeInsets.top = 16
+            stack.edgeInsets.top = 20
         } else {
             for view in compactHeader.views { compactHeader.removeView(view) }
             if titleLabel.superview !== stack {
                 stack.insertArrangedSubview(titleLabel, at: 2)
                 stack.insertArrangedSubview(subtitleLabel, at: 3)
-                titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
-                subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -19).isActive = true
-                stack.setCustomSpacing(2, after: titleLabel)
-                stack.setCustomSpacing(7, after: subtitleLabel)
+                titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * Self.inset).isActive = true
+                subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * Self.inset).isActive = true
+                stack.setCustomSpacing(3, after: titleLabel)
+                stack.setCustomSpacing(9, after: subtitleLabel)
             }
             stack.edgeInsets.top = 0
         }
-        stack.setCustomSpacing(16, after: compactHeader)
+        stack.setCustomSpacing(20, after: compactHeader)
         view.needsLayout = true
     }
 
@@ -267,7 +314,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         let titles = NSStackView(views: [titleLabel, subtitleLabel])
         titles.orientation = .vertical
         titles.alignment = .leading
-        titles.spacing = 2
+        titles.spacing = 3
         return titles
     }
 
@@ -295,16 +342,69 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         compactPreview.image = image
     }
 
+    /// Shows `rows` (and `moreRows`) in reused row views; an identical update
+    /// changes nothing.
     private func rebuildRows() {
-        for view in rowsStack.arrangedSubviews { rowsStack.removeArrangedSubview(view); view.removeFromSuperview() }
         let all = showsMore ? rows + moreRows : rows
-        for (index, row) in all.enumerated() {
-            let view = InspectorRowView(row, separator: index > 0)
-            view.translatesAutoresizingMaskIntoConstraints = false
-            rowsStack.addArrangedSubview(view)
-            view.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
+        if infoHeader.isHidden != all.isEmpty { infoHeader.isHidden = all.isEmpty }
+        chooseDateLength(all)
+        guard all != shownRows || fullDates != shownFullDates else { return }
+        shownRows = all
+        shownFullDates = fullDates
+        while rowViews.count < all.count {
+            let row = InspectorRowView()
+            row.translatesAutoresizingMaskIntoConstraints = false
+            rowViews.append(row)
         }
-        infoHeader.isHidden = all.isEmpty
+        // Rows beyond `all` are removed, not hidden: a stack view detaches hidden
+        // views, which would drop their width constraint. Removed rows are always
+        // a suffix, so re-added ones keep their order.
+        for (index, row) in rowViews.enumerated() {
+            if index < all.count {
+                let info = all[index]
+                row.configure(info, text: fullDates ? info.value : (info.compactValue ?? info.value))
+                if row.superview == nil {
+                    rowsStack.addArrangedSubview(row)
+                    row.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
+                }
+            } else if row.superview != nil {
+                rowsStack.removeArrangedSubview(row)
+                row.removeFromSuperview()
+            }
+        }
+    }
+
+    /// Like Finder, one length for all date rows: the long form ("September 20,
+    /// 2026 at 8:17 PM") when every one of them fits, otherwise the medium one.
+    private func chooseDateLength(_ all: [InfoRow]) {
+        if all != measuredRows {
+            measuredRows = all
+            // Each field pads its text by 2 pt on both sides; 10 pt between them.
+            longDatesWidth = all.reduce(CGFloat(0)) { width, row in
+                row.compactValue == nil ? width : max(width, Self.textWidth(row.label) + Self.textWidth(row.value) + 18)
+            }
+        }
+        let width = rowsStack.bounds.width
+        // Not laid out yet: keep the last choice until rowsFrameDidChange.
+        guard width > 0 else { return }
+        fullDates = width >= longDatesWidth
+    }
+
+    private static func textWidth(_ string: String) -> CGFloat {
+        ceil((string as NSString).size(withAttributes: [.font: rowFont]).width)
+    }
+
+    /// The pane got wider or narrower: the date rows may switch length.
+    @objc private func rowsFrameDidChange(_ notification: Notification) {
+        let width = rowsStack.bounds.width
+        guard width != dateWidth else { return }
+        dateWidth = width
+        rebuildRows()
+    }
+
+    /// A date row: the long form, with the medium one for narrow panes.
+    private func dateRow(_ label: String, _ date: Date) -> InfoRow {
+        InfoRow(label: label, value: Self.fullDateFormatter.string(from: date), compactValue: Formatters.longDate(date))
     }
 
     private func setRows(_ newRows: [InfoRow]? = nil, more newMore: [InfoRow]? = nil) {
@@ -318,7 +418,27 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     /// Shows `items`, or the folder at `folderPath` when nothing is selected.
     func show(items: [FileItem], folderPath: String?) {
         _ = view
-        let key = items.map { "\($0.path)|\($0.modified)|\($0.labelIndex)" }.joined(separator: "\n") + "|" + (folderPath ?? "")
+        // Nothing is seen while the pane is collapsed or not laid out yet: keep
+        // the request for viewDidLayout and drop the work in flight.
+        guard view.window != nil, !view.isHiddenOrHasHiddenAncestor, view.bounds.width > 1 else {
+            pending = (items: items, folderPath: folderPath)
+            currentKey = ""
+            token += 1
+            sizedFolder = nil
+            imageLoader.cancel()
+            compactLoader.cancel()
+            metadataWork?.cancel()
+            return
+        }
+        pending = nil
+        // Covers every item without building one long string for a big selection.
+        var hasher = Hasher()
+        for item in items {
+            hasher.combine(item.path)
+            hasher.combine(item.modified)
+            hasher.combine(item.labelIndex)
+        }
+        let key = "\(items.count)|\(hasher.finalize())|" + (folderPath ?? "")
         guard key != currentKey else { return }
         currentKey = key
         token += 1
@@ -326,6 +446,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         sizedFolder = nil
         imageLoader.cancel()
         compactLoader.cancel()
+        metadataWork?.cancel()
 
         var subjects = items
         if subjects.isEmpty, let folderPath, let folder = FileItem.make(path: folderPath) {
@@ -346,36 +467,52 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     }
 
     private func describeMultiple(_ items: [FileItem]) {
-        titleLabel.stringValue = "\(items.count) items"
+        titleLabel.stringValue = Formatters.count(items.count, "item")
         let total = items.reduce(Int64(0)) { $0 + max(0, $1.displaySize) }
+        // A folder still being sized would make the total too small.
+        let sizeKnown = !items.contains { $0.displaySize < 0 }
         let folders = items.filter { $0.isDirectoryOnDisk }.count
         var parts: [String] = []
         if folders > 0 { parts.append(Formatters.count(folders, "folder")) }
         if items.count - folders > 0 { parts.append(Formatters.count(items.count - folders, "file")) }
-        subtitleLabel.stringValue = parts.joined(separator: ", ") + (total > 0 ? " - " + Formatters.size(total) : "")
-        setImage(NSWorkspace.shared.icon(forFiles: items.prefix(32).map { $0.path }) ?? IconCache.shared.immediateIcon(for: items[0]))
+        subtitleLabel.stringValue = parts.joined(separator: ", ") + (sizeKnown && total > 0 ? " - " + Formatters.size(total) : "")
+        // Any two paths give the generic multiple-items icon.
+        setImage(NSWorkspace.shared.icon(forFiles: items.prefix(2).map { $0.path }) ?? IconCache.shared.immediateIcon(for: items[0]))
         let modified = items.map { $0.modified }.max() ?? 0
-        setRows([InfoRow(label: "Latest change", value: Formatters.longDate(Date(timeIntervalSince1970: modified)))], more: [])
+        let latest = modified > 0 ? [dateRow("Latest change", Date(timeIntervalSince1970: modified))] : []
+        setRows(latest, more: [])
         setTags([])
     }
 
     private func describe(_ item: FileItem, token: Int) {
-        titleLabel.stringValue = item.name
+        titleLabel.stringValue = item.displayName
         let kind = FileKinds.kind(for: item)
         let size = item.displaySize
         subtitleLabel.stringValue = size >= 0 ? "\(kind) - \(Formatters.size(size))" : kind
         setImage(IconCache.shared.cachedItemIcon(path: item.path) ?? IconCache.shared.immediateIcon(for: item))
-        setRows([
-            InfoRow(label: "Created", value: Formatters.longDate(item.createdDate)),
-            InfoRow(label: "Modified", value: Formatters.longDate(item.modifiedDate)),
-        ], more: baseMoreRows(for: item, kind: kind))
-        setTags([])
+        // An unknown date (0, e.g. no birth times on the volume) is left out, not shown as 1970.
+        var base: [InfoRow] = []
+        if item.created > 0 { base.append(dateRow("Created", item.createdDate)) }
+        if item.modified > 0 { base.append(dateRow("Modified", item.modifiedDate)) }
+        rows = base
+        moreRows = baseMoreRows(for: item, kind: kind)
+        // Facts looked up before show at once, so the Tags section doesn't jump
+        // and tags don't blink; the lookup below refreshes them in place.
+        let url = item.url
+        if let cached = ItemMetadata.cached(url) {
+            applyMetadata(cached)
+        } else {
+            rebuildRows()
+            setTags([])
+        }
 
         // Artwork: the item's own icon, then a thumbnail for images, movies and documents.
         if compact {
-            compactLoader.load(item, into: compactPreview, points: 40, thumbnails: true)
+            compactLoader.load(item, into: compactPreview, points: 48, thumbnails: true, iconMode: true)
         } else {
-            imageLoader.load(item, into: preview, points: min(256, max(64, preview.bounds.width)), thumbnails: true)
+            // One size for every pane width (the preview is at most 256 pt wide),
+            // also before the first layout.
+            imageLoader.load(item, into: preview, points: 256, thumbnails: true)
         }
 
         // Folder size, computed in the background.
@@ -396,28 +533,36 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             }
         }
 
-        // Spotlight metadata and tags (cheap, but off the main thread).
-        let url = item.url
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Spotlight metadata and tags, off the main thread. Lookups run one at a
+        // time; a newer selection cancels one that hasn't started yet.
+        metadataWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             let metadata = ItemMetadata.load(url)
             DispatchQueue.main.async {
                 guard let self, token == self.token else { return }
-                var rows = self.rows
-                if let lastOpened = metadata.lastOpened {
-                    rows.append(InfoRow(label: "Last opened", value: Formatters.longDate(lastOpened)))
-                }
-                if let dimensions = metadata.dimensions { rows.append(InfoRow(label: "Dimensions", value: dimensions)) }
-                if let duration = metadata.duration { rows.append(InfoRow(label: "Duration", value: duration)) }
-                var more = self.moreRows
-                if let version = metadata.version { more.append(InfoRow(label: "Version", value: version)) }
-                if let whereFrom = metadata.whereFrom { more.append(InfoRow(label: "Where from", value: whereFrom)) }
-                self.setRows(rows, more: more)
-                self.setTags(metadata.tags)
+                self.applyMetadata(metadata)
             }
         }
+        metadataWork = work
+        Self.metadataQueue.async(execute: work)
+    }
+
+    /// Adds the Spotlight rows and tags. Applying again (cached, then fresh
+    /// facts) replaces the earlier rows instead of adding them twice.
+    private func applyMetadata(_ metadata: ItemMetadata) {
+        var rows = self.rows.filter { !["Last opened", "Dimensions", "Duration"].contains($0.label) }
+        if let lastOpened = metadata.lastOpened { rows.append(dateRow("Last opened", lastOpened)) }
+        if let dimensions = metadata.dimensions { rows.append(InfoRow(label: "Dimensions", value: dimensions)) }
+        if let duration = metadata.duration { rows.append(InfoRow(label: "Duration", value: duration)) }
+        var more = moreRows.filter { $0.label != "Version" && $0.label != "Where from" }
+        if let version = metadata.version { more.append(InfoRow(label: "Version", value: version)) }
+        if let whereFrom = metadata.whereFrom { more.append(InfoRow(label: "Where from", value: whereFrom)) }
+        setRows(rows, more: more)
+        setTags(metadata.tags)
     }
 
     private func setTags(_ tags: [String]) {
+        guard tags != shownTags || (tagField.objectValue as? [String]) != tags else { return }
         shownTags = tags
         tagField.objectValue = tags
     }
@@ -474,7 +619,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             }
         }
         rows.append(InfoRow(label: "Where", value: item.parentPath))
-        if let added = item.addedDate { rows.append(InfoRow(label: "Added", value: Formatters.longDate(added))) }
+        if let added = item.addedDate { rows.append(dateRow("Added", added)) }
         rows.append(InfoRow(label: "Permissions", value: ItemMetadata.permissions(item.mode)))
         if item.isLocked { rows.append(InfoRow(label: "Locked", value: "Yes")) }
         if item.isHidden { rows.append(InfoRow(label: "Hidden", value: "Yes")) }
@@ -491,14 +636,22 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         // Tags removed here are removed from every selected item; added ones are added to all.
         let removed = Set(shownTags).subtracting(tags)
         let added = tags.filter { !shownTags.contains($0) }
-        for url in urls {
-            var current = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
-            current.removeAll { removed.contains($0) }
-            for tag in added where !current.contains(tag) { current.append(tag) }
-            try? (url as NSURL).setResourceValue(current, forKey: .tagNamesKey)
-        }
+        let targets = urls
         shownTags = tags
-        ItemAttributes.reloadParents(of: urls)
         currentKey = ""
+        // Old tags must not come back from the cache before the write lands.
+        ItemMetadata.invalidate(targets)
+        // Off the main thread (many files, slow volumes), and on the lookups'
+        // serial queue: edits can't race each other, and a later lookup reads
+        // the new tags.
+        Self.metadataQueue.async {
+            for url in targets {
+                var current = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
+                current.removeAll { removed.contains($0) }
+                for tag in added where !current.contains(tag) { current.append(tag) }
+                try? (url as NSURL).setResourceValue(current, forKey: .tagNamesKey)
+            }
+            DispatchQueue.main.async { ItemAttributes.reloadParents(of: targets) }
+        }
     }
 }

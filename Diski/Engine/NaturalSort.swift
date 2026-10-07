@@ -28,7 +28,7 @@ struct NameSortKey {
         guard let x = a.folded, let y = b.folded else {
             return a.name.localizedStandardCompare(b.name)
         }
-        let result = compareFolded(x, y)
+        let result = x.withUnsafeBufferPointer { xs in y.withUnsafeBufferPointer { ys in compareFolded(xs, ys) } }
         if result != .orderedSame { return result }
         // Equal ignoring case: fall back to a stable, case-sensitive order.
         return a.name < b.name ? .orderedAscending : (a.name == b.name ? .orderedSame : .orderedDescending)
@@ -36,7 +36,8 @@ struct NameSortKey {
 
     private static func isDigit(_ c: UInt8) -> Bool { c >= 48 && c <= 57 }
 
-    private static func compareFolded(_ x: [UInt8], _ y: [UInt8]) -> ComparisonResult {
+    /// Natural order of two folded names (see `folded`), without bounds checks.
+    static func compareFolded(_ x: UnsafeBufferPointer<UInt8>, _ y: UnsafeBufferPointer<UInt8>) -> ComparisonResult {
         var i = 0, j = 0
         let n = x.count, m = y.count
         while i < n && j < m {

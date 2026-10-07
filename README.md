@@ -20,7 +20,7 @@ Everything Finder does — and the things it should have done all along — with
 
 ## Install
 
-1. Download **Diski-v0.1.1-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
+1. Download **Diski-v0.1.2-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
 2. The alpha is not notarized yet, so macOS blocks the first launch. Run this once in Terminal, then open Diski:
    ```sh
    xattr -dr com.apple.quarantine /Applications/Diski.app
@@ -117,13 +117,13 @@ Settings › Speed has a built-in speed test that compares Diski's folder readin
 | ⌘1–⌘4 | Icons, List, Columns, Gallery |
 | ⌘F ⇧⌘G ⌥⌘C ⌘J | Filter/search, go to folder, copy path, view options |
 | ⌘\\ · F5 · F6 · Tab | Dual pane, copy/move to other pane, switch pane |
-| ⇧⌘. ⇧⌘P ⌥⌘P ⌥⌘S | Hidden files, preview, path bar, sidebar |
+| ⇧⌘. ⇧⌘P ⌥⌘P ⌃⌘S | Hidden files, preview, path bar, sidebar |
 
 Help › Diski Keyboard Shortcuts (⇧⌘/) shows the full list.
 
 ## The icon
 
-`Diski/AppIcon.icon` is an Icon Composer document: the Finder face, with the same equal, concentric margins, in an orchid pink-to-violet gradient, with a frosted Liquid Glass face panel and a glass cherry blossom tucked in like a hair ornament. Dark, tinted and clear variants are included. Open it in Icon Composer to tweak it.
+`Diski/AppIcon.icon` is an Icon Composer document: "Midnight Glass", the Finder face on a deep indigo tile, its profile half a thick slab of periwinkle Liquid Glass with the smile seen through it. Dark, tinted and clear variants are included. Open it in Icon Composer to tweak it.
 
 <p align="center"><img src="docs/icon-variants.png" width="720" alt="Icon variants"></p>
 

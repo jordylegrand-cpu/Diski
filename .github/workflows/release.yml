@@ -42,7 +42,7 @@ jobs:
           cat > notes.md <<NOTES
           <p align="center"><img src="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/docs/icon.png" width="128" alt="Diski"></p>
 
-          **Diski ${VERSION}** — the first public alpha of the fast, native Finder alternative for macOS 26 and later.
+          **Diski ${VERSION}** — an alpha of the fast, native Finder alternative for macOS 26 and later.
 
           - Four views (icons, list, columns, gallery), Finder's sidebar and native preview pane
           - Instant APFS clones, parallel copies, Finder's Copy window with pause and stop

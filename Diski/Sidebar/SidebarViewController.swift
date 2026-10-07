@@ -76,6 +76,22 @@ enum SidebarIcons {
 final class SidebarCellView: NSTableCellView {
     let eject = NSButton()
     var onEject: (() -> Void)?
+    /// Only a visible eject button takes room from the name.
+    var showsEject = false {
+        didSet {
+            guard showsEject != oldValue else { return }
+            eject.isHidden = !showsEject
+            labelBeforeEject?.isActive = showsEject
+        }
+    }
+    // Optionals: NSTableCellView may set rowSizeStyle before these exist.
+    private var iconCenterX: NSLayoutConstraint?
+    private var labelLeading: NSLayoutConstraint?
+    private var labelBeforeEject: NSLayoutConstraint?
+
+    override var rowSizeStyle: NSTableView.RowSizeStyle {
+        didSet { applyRowSizeMetrics() }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -88,28 +104,45 @@ final class SidebarCellView: NSTableCellView {
         eject.translatesAutoresizingMaskIntoConstraints = false
         eject.bezelStyle = .inline
         eject.isBordered = false
-        eject.image = NSImage(systemSymbolName: "eject", accessibilityDescription: "Eject")
+        eject.image = NSImage(systemSymbolName: "eject.fill", accessibilityDescription: "Eject")
+        eject.symbolConfiguration = NSImage.SymbolConfiguration(scale: .small)
+        eject.refusesFirstResponder = true
         eject.target = self
         eject.action = #selector(ejectClicked)
         eject.toolTip = "Eject"
+        eject.isHidden = true
         addSubview(icon)
         addSubview(label)
         addSubview(eject)
         imageView = icon
         textField = label
+        // The icon is centred on a fixed x at its natural size (no width clamp).
+        let iconCenterX = icon.centerXAnchor.constraint(equalTo: leadingAnchor, constant: 13)
+        let labelLeading = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 30)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 20),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
+            iconCenterX,
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            labelLeading,
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            eject.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
-            eject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            eject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
             eject.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        self.iconCenterX = iconCenterX
+        self.labelLeading = labelLeading
+        labelBeforeEject = eject.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4)
+        applyRowSizeMetrics()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The system sidebar size's icon slot (16/20/24 pt), 3 pt in; the name
+    /// starts 7 pt after it. Medium (13/30) is measured from Finder.
+    private func applyRowSizeMetrics() {
+        let slot: CGFloat = rowSizeStyle == .small ? 16 : (rowSizeStyle == .large ? 24 : 20)
+        iconCenterX?.constant = 3 + slot / 2
+        labelLeading?.constant = 3 + slot + 7
+    }
 
     @objc private func ejectClicked() { onEject?() }
 }
@@ -127,6 +160,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     static let recentsMarker = "diski:recents"
     private let contextMenu = NSMenu()
     private static let favoriteDragType = NSPasteboard.PasteboardType("app.diski.sidebar-favorite")
+    /// Drawn once; the dynamic tag colors resolve at draw time.
+    private static var tagDots: [Int: NSImage] = [:]
+    /// Whether the current drag (by sequence number) carries a folder, so
+    /// validateDrop reads and stats the pasteboard once per drag.
+    private var folderDragCheck: (sequence: Int, hasFolders: Bool)?
 
     override func loadView() {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
@@ -159,7 +197,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         // Below the toolbar, like Finder's sidebar (no scroll edge line).
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 600))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 177, height: 600))
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
         NSLayoutConstraint.activate([
@@ -174,8 +212,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for section in sections { outlineView.expandItem(section) }
 
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(sourcesChanged), name: VolumeMonitor.didChange, object: nil)
-        center.addObserver(self, selector: #selector(sourcesChanged), name: Prefs.didChange, object: nil)
+        center.addObserver(self, selector: #selector(sourcesChanged(_:)), name: VolumeMonitor.didChange, object: nil)
+        center.addObserver(self, selector: #selector(sourcesChanged(_:)), name: Prefs.didChange, object: nil)
     }
 
     deinit {
@@ -186,12 +224,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private var lastFavorites: [String] = []
 
-    @objc private func sourcesChanged() {
+    @objc private func sourcesChanged(_ notification: Notification) {
+        // Of the preferences, only the favorites change the sidebar.
+        if notification.name == Prefs.didChange,
+           let key = notification.userInfo?[Prefs.changedKey] as? String, key != "favorites" { return }
         // Prefs changes are frequent; only rebuild when the sidebar content changed.
         if Prefs.favorites == lastFavorites && sections.count == 3 && volumesUnchanged() { return }
-        let expanded = sections.filter { outlineView.isItemExpanded($0) }.map { $0.id }
+        let collapsed = Set(sections.filter { !outlineView.isItemExpanded($0) }.map { $0.id })
         rebuild()
-        for section in sections where expanded.contains(section.id) || expanded.isEmpty {
+        for section in sections where !collapsed.contains(section.id) {
             outlineView.expandItem(section)
         }
         highlight(path: highlightedPath)
@@ -199,8 +240,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private var lastVolumes: [VolumeInfo] = []
 
+    /// Any field: a renamed volume keeps its path, and the capacity tooltips
+    /// come from the entries. VolumeMonitor changes only on (un)mount/rename.
     private func volumesUnchanged() -> Bool {
-        VolumeMonitor.shared.volumes.map { $0.path } == lastVolumes.map { $0.path }
+        VolumeMonitor.shared.volumes == lastVolumes
     }
 
     private func rebuild() {
@@ -236,7 +279,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         locations.entries.append(SidebarEntry(kind: .airDrop, title: "AirDrop", path: nil,
                                               image: SidebarIcons.image(symbol: "dot.radiowaves.left.and.right")))
         for volume in volumes where !volume.isInternal {
-                        let symbol = volume.isLocal ? "externaldrive" : "server.rack"
+            let symbol = volume.isLocal ? "externaldrive" : "server.rack"
             locations.entries.append(SidebarEntry(kind: .volume, title: volume.name, path: volume.path,
                                                   image: SidebarIcons.image(symbol: symbol), volume: volume))
         }
@@ -247,8 +290,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
         let tags = SidebarSection(id: "tags", title: "Tags")
         for index in TagColors.sidebarOrder {
-            tags.entries.append(SidebarEntry(kind: .tag(index), title: TagColors.names[index], path: nil,
-                                             image: PaneViewController.dotImage(TagColors.color(forLabel: index), size: 12)))
+            // 14 pt with a 1 pt inset: a 12 pt circle, like Finder's.
+            let dot = Self.tagDots[index] ?? PaneViewController.dotImage(TagColors.color(forLabel: index), size: 14)
+            Self.tagDots[index] = dot
+            tags.entries.append(SidebarEntry(kind: .tag(index), title: TagColors.names[index], path: nil, image: dot))
         }
         sections = [favorites, locations, tags]
         outlineView.reloadData()
@@ -313,7 +358,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 cell.textField = label
                 NSLayoutConstraint.activate([
                     label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor, constant: 2),
                 ])
                 return cell
             }()
@@ -330,19 +375,37 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         cell.textField?.stringValue = entry.title
         cell.imageView?.image = entry.image
         let ejectable = entry.volume.map { !$0.isRoot && ($0.isEjectable || $0.isRemovable || !$0.isLocal || !$0.isInternal) } ?? false
-        cell.eject.isHidden = !ejectable
-        cell.onEject = { [weak self] in
-            guard let volume = entry.volume else { return }
-            VolumeMonitor.shared.eject(volume) { error in
-                if let error { self?.presentError(error) }
+        cell.showsEject = ejectable
+        if ejectable {
+            cell.onEject = { [weak self] in
+                guard let volume = entry.volume else { return }
+                VolumeMonitor.shared.eject(volume) { error in
+                    if let error { self?.presentError(error) }
+                }
             }
+        } else {
+            cell.onEject = nil
         }
         if let volume = entry.volume, volume.totalCapacity > 0 {
             cell.toolTip = "\(Formatters.size(volume.availableCapacity)) available of \(Formatters.size(volume.totalCapacity))"
         } else {
-            cell.toolTip = entry.path
+            cell.toolTip = entry.kind == .recents ? nil : entry.path
         }
         return cell
+    }
+
+    // MARK: Tint
+
+    /// Like Finder: Recents and Favorites in the accent color, Locations in gray.
+    func outlineView(_ outlineView: NSOutlineView, tintConfigurationForItem item: Any) -> NSTintConfiguration? {
+        if let section = item as? SidebarSection {
+            return section.id == "locations" ? NSTintConfiguration.monochrome : nil
+        }
+        guard let entry = item as? SidebarEntry else { return nil }
+        switch entry.kind {
+        case .iCloud, .home, .volume, .airDrop, .network, .trash: return NSTintConfiguration.monochrome
+        default: return nil
+        }
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -442,9 +505,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         // Between rows in Favorites: add or reorder folders.
         if let section = item as? SidebarSection, section.id == "favorites", index != NSOutlineViewDropOnItemIndex {
             if pasteboard.availableType(from: [Self.favoriteDragType]) != nil { return .move }
+            // validateDrop runs on every drag movement: check the files once per drag.
+            let sequence = info.draggingSequenceNumber
+            if let check = folderDragCheck, check.sequence == sequence {
+                return check.hasFolders ? .link : []
+            }
             let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-            let folders = urls.filter { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            return folders.isEmpty ? [] : .link
+            let hasFolders = urls.contains { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            folderDragCheck = (sequence: sequence, hasFolders: hasFolders)
+            return hasFolders ? .link : []
         }
         // Onto a location: move/copy/trash into it.
         guard pasteboard.availableType(from: [Self.favoriteDragType]) == nil,

@@ -60,7 +60,7 @@ final class InfoSection: NSStackView {
 
 /// Finder's Get Info window (⌘I): one native window per item with General,
 /// More Info, Name & Extension, Open With, Preview and Sharing & Permissions.
-final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenFieldDelegate {
+final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenFieldDelegate, NSMenuDelegate {
     private static var controllers: [String: InfoWindowController] = [:]
     private static let width: CGFloat = 290
 
@@ -92,10 +92,14 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
     private let locked = NSButton(checkboxWithTitle: "Locked", target: nil, action: nil)
     private let tagField = NSTokenField()
     private var moreInfoGrid = NSGridView()
+    private var lastOpenedValue: NSTextField?
     private var appPopup: NSPopUpButton?
     private var changeAll: NSButton?
     private var appURLs: [URL] = []
+    /// Whether the Open with menu lists every app, not just the default one.
+    private var appsLoaded = false
     private let previewLoader = ItemImageLoader()
+    private let headerLoader = ItemImageLoader()
     private var shownTags: [String] = []
 
     private init(item: FileItem) {
@@ -105,6 +109,8 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         window.title = "\(item.name) Info"
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
+        // Nothing scrolls under the title bar, so no line splits it from the content.
+        window.titlebarSeparatorStyle = .none
         super.init(window: window)
         window.delegate = self
         build()
@@ -175,8 +181,9 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
 
     private func header() -> NSView {
         let icon = NSImageView()
-        icon.image = IconCache.shared.cachedItemIcon(path: item.path) ?? NSWorkspace.shared.icon(forFile: item.path)
         icon.imageScaling = .scaleProportionallyUpOrDown
+        // The type icon at once, then the item's thumbnail, like the list shows it.
+        headerLoader.load(item, into: icon, points: 32, thumbnails: true, iconMode: true)
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 32).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 32).isActive = true
@@ -185,7 +192,9 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         headerName.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         headerName.lineBreakMode = .byTruncatingMiddle
         headerName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let modified = NSTextField(labelWithString: "Modified: \(Formatters.longDate(item.modifiedDate))")
+        // Finder's relative form: "Modified: Today at 8:24 PM".
+        let modified = NSTextField(labelWithString: "Modified: "
+                                   + Formatters.listDate(item.modifiedDate.timeIntervalSince1970, length: .medium))
         modified.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         modified.textColor = .secondaryLabelColor
         modified.lineBreakMode = .byTruncatingTail
@@ -218,7 +227,9 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         let value = lines > 1 ? NSTextField(wrappingLabelWithString: text) : NSTextField(labelWithString: text)
         value.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         value.isSelectable = true
-        value.lineBreakMode = lines > 1 ? .byCharWrapping : .byTruncatingMiddle
+        // Paths wrap between their " ▸ " components, not inside a folder name.
+        value.lineBreakMode = lines > 1 ? .byWordWrapping : .byTruncatingMiddle
+        if lines > 1 { value.cell?.truncatesLastVisibleLine = true }
         value.maximumNumberOfLines = lines
         value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         value.preferredMaxLayoutWidth = 170
@@ -272,8 +283,14 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         return Formatters.preciseSize(max(0, item.size)) + onDisk
     }
 
+    /// The rows known at once; the Spotlight facts are appended in apply(_:).
     private func moreInfo() -> NSView {
-        moreInfoGrid = grid([("Last opened:", Self.gridValue("--"))])
+        var rows: [(String, NSView)] = []
+        if let added = item.addedDate { rows.append(("Added:", Self.gridValue(Formatters.longDate(added)))) }
+        let lastOpened = Self.gridValue("--")
+        lastOpenedValue = lastOpened
+        rows.append(("Last opened:", lastOpened))
+        moreInfoGrid = grid(rows)
         return moreInfoGrid
     }
 
@@ -295,7 +312,11 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
-        nameField.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18).isActive = true
+        // Below the section's own (required) indent and trailing limit, so a
+        // legacy scroller narrows the field instead of breaking the indent.
+        let width = nameField.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18)
+        width.priority = .defaultHigh
+        width.isActive = true
         return column
     }
 
@@ -303,23 +324,22 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
         popup.controlSize = .small
         popup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let preferred = NSWorkspace.shared.urlForApplication(toOpen: url)
-        var apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
-        if let preferred, !apps.contains(preferred) { apps.insert(preferred, at: 0) }
-        appURLs = apps
-        for app in apps {
-            let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
-            let entry = NSMenuItem(title: app == preferred ? "\(name) (default)" : name, action: nil, keyEquivalent: "")
-            let icon = NSWorkspace.shared.icon(forFile: app.path)
-            icon.size = NSSize(width: 16, height: 16)
-            entry.image = icon
-            popup.menu?.addItem(entry)
+        if let preferred = NSWorkspace.shared.urlForApplication(toOpen: url) {
+            // Only the default app up front: the full list (a LaunchServices
+            // query and an icon per app) loads when the menu first opens.
+            appURLs = [preferred]
+            popup.menu?.addItem(appMenuItem(preferred, isDefault: true))
+            popup.selectItem(at: 0)
+            popup.menu?.delegate = self
+        } else {
+            let apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
+            appURLs = apps
+            for app in apps { popup.menu?.addItem(appMenuItem(app, isDefault: false)) }
+            if apps.isEmpty {
+                popup.addItem(withTitle: "No application available")
+                popup.isEnabled = false
+            }
         }
-        if apps.isEmpty {
-            popup.addItem(withTitle: "No application available")
-            popup.isEnabled = false
-        }
-        if let preferred, let index = apps.firstIndex(of: preferred) { popup.selectItem(at: index) }
         popup.target = self
         popup.action = #selector(appChosen)
         appPopup = popup
@@ -327,7 +347,8 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         let note = NSTextField(wrappingLabelWithString: "Use this application to open all documents like this one.")
         note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         note.textColor = .secondaryLabelColor
-        note.preferredMaxLayoutWidth = Self.width - 32 - 18
+        // Fits the section with overlay and legacy scrollers alike.
+        note.preferredMaxLayoutWidth = 200
         let button = NSButton(title: "Change All…", target: self, action: #selector(changeAllDocuments))
         button.controlSize = .small
         button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -337,8 +358,30 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 6
-        popup.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18).isActive = true
+        let width = popup.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18)
+        width.priority = .defaultHigh
+        width.isActive = true
         return column
+    }
+
+    /// "Preview (default)" with the app's 16 pt icon.
+    private func appMenuItem(_ app: URL, isDefault: Bool) -> NSMenuItem {
+        let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
+        let entry = NSMenuItem(title: isDefault ? "\(name) (default)" : name, action: nil, keyEquivalent: "")
+        let icon = NSWorkspace.shared.icon(forFile: app.path)
+        icon.size = NSSize(width: 16, height: 16)
+        entry.image = icon
+        return entry
+    }
+
+    /// Lists the other apps the first time the Open with menu opens.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard !appsLoaded, menu === appPopup?.menu else { return }
+        appsLoaded = true
+        for app in NSWorkspace.shared.urlsForApplications(toOpen: url) where !appURLs.contains(app) {
+            appURLs.append(app)
+            menu.addItem(appMenuItem(app, isDefault: false))
+        }
     }
 
     private func preview() -> NSView {
@@ -348,7 +391,9 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         for axis in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
             image.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(100), for: axis)
         }
-        image.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18).isActive = true
+        let width = image.widthAnchor.constraint(equalToConstant: Self.width - 32 - 18)
+        width.priority = .defaultHigh
+        width.isActive = true
         image.heightAnchor.constraint(equalToConstant: 180).isActive = true
         previewLoader.load(item, into: image, points: 180, thumbnails: true)
         return image
@@ -412,14 +457,14 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
     private func apply(_ metadata: ItemMetadata) {
         shownTags = metadata.tags
         tagField.objectValue = metadata.tags
+        lastOpenedValue?.stringValue = metadata.lastOpened.map { Formatters.longDate($0) } ?? "--"
+        // Runs once, so rows are only appended: NSGridView.removeRow(at:) would
+        // leave the cells' views behind, drawn over the new rows.
         var rows: [(String, String)] = []
-        if let added = item.addedDate { rows.append(("Added:", Formatters.longDate(added))) }
-        rows.append(("Last opened:", metadata.lastOpened.map { Formatters.longDate($0) } ?? "--"))
         if let dimensions = metadata.dimensions { rows.append(("Dimensions:", dimensions)) }
         if let duration = metadata.duration { rows.append(("Duration:", duration)) }
         if let version = metadata.version { rows.append(("Version:", version)) }
         if let whereFrom = metadata.whereFrom { rows.append(("Where from:", whereFrom)) }
-        while moreInfoGrid.numberOfRows > 0 { moreInfoGrid.removeRow(at: 0) }
         for (label, value) in rows {
             moreInfoGrid.addRow(with: [Self.gridLabel(label), Self.gridValue(value, lines: label == "Where from:" ? 3 : 1)])
         }
@@ -441,7 +486,13 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         if let visible = (window.screen ?? NSScreen.main)?.visibleFrame, frame.minY < visible.minY {
             frame.origin.y = visible.minY
         }
-        window.setFrame(frame, display: true, animate: animate && window.isVisible)
+        guard frame != window.frame else { return }
+        // The animator proxy resizes without blocking the main thread.
+        if animate && window.isVisible {
+            window.animator().setFrame(frame, display: true)
+        } else {
+            window.setFrame(frame, display: true)
+        }
     }
 
     /// Cascades from the key window's top-left, like Finder's Info windows.
@@ -539,6 +590,7 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
 
     func windowWillClose(_ notification: Notification) {
         previewLoader.cancel()
+        headerLoader.cancel()
         Self.controllers.removeValue(forKey: item.path)
     }
 }
