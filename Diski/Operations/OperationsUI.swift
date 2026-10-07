@@ -22,6 +22,7 @@ final class OperationRowView: NSView {
     /// What update() last applied, so unchanged ticks touch nothing.
     private var shownPaused: Bool?
     private var shownDone: Bool?
+    private var runningTitle: String?
 
     /// `compact` rows (the finished popover) hug their text; window rows
     /// keep Finder's 76 pt and centre the text block when it is shorter.
@@ -136,14 +137,20 @@ final class OperationRowView: NSView {
         if done {
             newTitle = finishedTitle
         } else {
-            newTitle = operation.title
+            if runningTitle == nil { runningTitle = operation.title }
+            newTitle = runningTitle ?? ""
             let snapshot = operation.snapshot
             let indeterminate = snapshot.scanning && snapshot.totalBytes == 0 && snapshot.totalItems == 0
             if bar.isIndeterminate != indeterminate {
                 bar.isIndeterminate = indeterminate
                 if indeterminate { bar.startAnimation(nil) } else { bar.stopAnimation(nil) }
             }
-            if !indeterminate { bar.doubleValue = operation.fractionCompleted }
+            if !indeterminate {
+                let fraction = snapshot.totalBytes > 0
+                    ? min(1, Double(snapshot.completedBytes) / Double(snapshot.totalBytes))
+                    : (snapshot.totalItems > 0 ? min(1, Double(snapshot.completedItems) / Double(snapshot.totalItems)) : 0)
+                if bar.doubleValue != fraction { bar.doubleValue = fraction }
+            }
             let paused = operation.isPaused
             if paused != shownPaused {
                 shownPaused = paused
@@ -257,10 +264,21 @@ final class HairlineView: NSView {
 /// Finder's "Copy" window: a native window listing the running operations.
 /// It opens by itself when an operation takes longer than a moment and
 /// closes when everything is done.
-final class ProgressWindowController: NSWindowController, NSWindowDelegate {
+final class ProgressWindowController: NSWindowController, NSWindowDelegate, NSPopoverDelegate {
     static let shared = ProgressWindowController()
 
     private let stack = NSStackView()
+    private let content = NSView()
+    /// Under the toolbar's progress item when a browser window shows one (like
+    /// Safari's downloads); the panel is only for when there is no such item.
+    private lazy var popover: NSPopover = {
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
+        return popover
+    }()
+    private var closingPopover = false
     private var rows: [ObjectIdentifier: OperationRowView] = [:]
     /// Operations shown in the window; finished ones stay a moment with their result.
     private var shown: [FileOperation] = []
@@ -287,7 +305,6 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
         stack.alignment = .leading
         stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let content = NSView()
         content.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -307,12 +324,63 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
 
     /// Whether the window was on screen while `operation` ran.
     func didShow(_ operation: FileOperation) -> Bool {
-        rows[ObjectIdentifier(operation)] != nil && window?.isVisible == true
+        rows[ObjectIdentifier(operation)] != nil && isOnScreen
+    }
+
+    private var isOnScreen: Bool { popover.isShown || window?.isVisible == true }
+
+    /// The progress item of the frontmost browser window, if it shows one.
+    private var toolbarAnchor: NSView? {
+        for candidate in [NSApp.keyWindow, NSApp.mainWindow] {
+            if let browser = candidate?.windowController as? BrowserWindowController, let anchor = browser.operationsAnchor {
+                return anchor
+            }
+        }
+        return nil
+    }
+
+    private func show(anchor: NSView?) {
+        guard let anchor else {
+            if popover.isShown { closePopover() }
+            if window?.contentView !== content { window?.contentView = content }
+            resizeToFit()
+            place()
+            window?.orderFront(nil)
+            return
+        }
+        if window?.isVisible == true { window?.orderOut(nil) }
+        if window?.contentView === content { window?.contentView = NSView() }
+        popover.contentSize = fittingContentSize
+        if popover.isShown { return }
+        let host = NSViewController()
+        host.view = content
+        popover.contentViewController = host
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    private func closePopover() {
+        closingPopover = true
+        popover.close()
+        closingPopover = false
+    }
+
+    private var fittingContentSize: NSSize {
+        content.layoutSubtreeIfNeeded()
+        return NSSize(width: 460, height: max(76, stack.fittingSize.height))
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        guard !closingPopover else { return }
+        // Closed by a click elsewhere: like closing the window.
+        dismissedByUser = !FileOperationManager.shared.activeOperations.isEmpty
+        pinned = false
+        lingering.removeAll()
+        sync()
     }
 
     /// Shows the window with every running operation, and the results of the
     /// ones that just finished (toolbar button, Window menu).
-    func present() {
+    func present(anchor: NSView? = nil) {
         dismissedByUser = false
         pinned = true
         for operation in FileOperationManager.shared.operations where operation.state.isDone {
@@ -324,8 +392,7 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
             NSSound.beep()
             return
         }
-        place()
-        window?.orderFront(nil)
+        show(anchor: anchor ?? toolbarAnchor)
     }
 
     @objc private func operationsChanged() {
@@ -339,13 +406,10 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak operation] in
                 guard let self, let operation, !operation.state.isDone, !self.dismissedByUser else { return }
                 self.sync()
-                if self.window?.isVisible != true {
-                    self.place()
-                    self.window?.orderFront(nil)
-                }
+                if !self.isOnScreen { self.show(anchor: self.toolbarAnchor) }
             }
         }
-        if window?.isVisible == true { sync() }
+        if isOnScreen { sync() }
     }
 
     @objc private func operationFinished(_ notification: Notification) {
@@ -384,23 +448,28 @@ final class ProgressWindowController: NSWindowController, NSWindowDelegate {
                 kept[id] = row
                 row.translatesAutoresizingMaskIntoConstraints = false
                 stack.addArrangedSubview(row)
-                row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+                if rows[id] == nil { row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
             }
             rows = kept
             window?.title = Self.title(for: wanted)
             resizeToFit()
         }
         for row in rows.values { row.update() }
-        if wanted.isEmpty, window?.isVisible == true {
+        if wanted.isEmpty, isOnScreen {
+            if popover.isShown { closePopover() }
             window?.orderOut(nil)
             dismissedByUser = false
         }
     }
 
     private func resizeToFit() {
-        guard let window, let content = window.contentView else { return }
-        content.layoutSubtreeIfNeeded()
-        let height = max(76, stack.fittingSize.height)
+        if popover.isShown {
+            let size = fittingContentSize
+            if popover.contentSize != size { popover.contentSize = size }
+            return
+        }
+        guard let window, window.contentView === content else { return }
+        let height = fittingContentSize.height
         var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: 460, height: height)))
         // Grow and shrink downwards from the title bar.
         frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)

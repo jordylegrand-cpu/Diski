@@ -12,6 +12,7 @@ final class InfoSection: NSStackView {
     private let disclosure = NSButton()
     private let content: NSView
     var onToggle: (() -> Void)?
+    var isExpanded: Bool { disclosure.state == .on }
 
     init(title: String, content: NSView, expanded: Bool) {
         self.content = content
@@ -55,6 +56,25 @@ final class InfoSection: NSStackView {
         content.isHidden = !expanded
         content.superview?.isHidden = !expanded
         onToggle?()
+    }
+}
+
+private final class LazyInfoContent: NSStackView {
+    private var make: (() -> NSView)?
+
+    init(make: @escaping () -> NSView) {
+        self.make = make
+        super.init(frame: .zero)
+        orientation = .vertical
+        alignment = .leading
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func load() {
+        guard let make else { return }
+        self.make = nil
+        addArrangedSubview(make())
     }
 }
 
@@ -141,12 +161,12 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
 
         addSection("General:", expanded: true, content: general())
         addSection("More Info:", expanded: true, content: moreInfo())
-        addSection("Name & Extension:", expanded: false, content: nameAndExtension())
+        addSection("Name & Extension:", expanded: false, content: lazyContent { [unowned self] in self.nameAndExtension() })
         if item.type == .file || (item.type == .package && !item.isApplication) {
             addSection("Open with:", expanded: true, content: openWith())
         }
         addSection("Preview:", expanded: true, content: preview())
-        addSection("Sharing & Permissions:", expanded: false, content: permissions())
+        addSection("Sharing & Permissions:", expanded: false, content: lazyContent { [unowned self] in self.permissions() })
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -172,9 +192,16 @@ final class InfoWindowController: NSWindowController, NSWindowDelegate, NSTokenF
         view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
     }
 
+    private func lazyContent(_ make: @escaping () -> NSView) -> NSView {
+        LazyInfoContent(make: make)
+    }
+
     private func addSection(_ title: String, expanded: Bool, content: NSView) {
         let section = InfoSection(title: title, content: content, expanded: expanded)
-        section.onToggle = { [weak self] in self?.fitWindow(animate: true) }
+        section.onToggle = { [weak self, weak section] in
+            if section?.isExpanded == true { (content as? LazyInfoContent)?.load() }
+            self?.fitWindow(animate: true)
+        }
         stack.addArrangedSubview(section)
         section.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
     }

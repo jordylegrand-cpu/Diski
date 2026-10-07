@@ -9,6 +9,8 @@ protocol PaneViewControllerDelegate: AnyObject {
     func paneRequestsFocusSwitch(_ pane: PaneViewController) -> Bool
     func pane(_ pane: PaneViewController, openInNewTab path: String)
     func paneRequestsQuickLook(_ pane: PaneViewController)
+    /// Closes Quick Look if it is open; false when there was nothing to close.
+    func paneRequestsQuickLookDismissal(_ pane: PaneViewController) -> Bool
     func paneRequestsInspector(_ pane: PaneViewController)
 }
 
@@ -36,10 +38,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
     private let message = PaneMessageView()
     private var pendingSelection: Set<String> = []
     private var pendingRename: String?
-    private var resortScheduled = false
+    private var resortWorkItem: DispatchWorkItem?
     private var loadingToken = 0
     /// Content below the toolbar, or below the search scope bar while it shows.
-    private var contentTopToSafeArea: NSLayoutConstraint!
+    private var contentTopToEdge: NSLayoutConstraint!
     private var contentTopToScopeBar: NSLayoutConstraint!
     /// Content above the path bar, or down to the bottom edge while it is hidden.
     private var contentToBar: NSLayoutConstraint!
@@ -103,7 +105,26 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
     deinit {
         NotificationCenter.default.removeObserver(self)
         searchEngine?.cancel()
-        if !currentPath.isEmpty { DirectoryStore.shared.endWatching(currentPath) }
+        if !currentPath.isEmpty {
+            DirectoryStore.shared.endWatching(currentPath)
+            resortWorkItem?.cancel()
+            resortWorkItem = nil
+            FolderSizer.shared.cancelJobs(inside: currentPath)
+        }
+    }
+
+    override func removeFromParent() {
+        resortWorkItem?.cancel()
+        resortWorkItem = nil
+        FolderSizer.shared.cancelJobs(inside: currentPath)
+        super.removeFromParent()
+    }
+
+    @objc private func windowWillClose(_ notification: Notification) {
+        guard isViewLoaded, let window = notification.object as? NSWindow, view.window === window else { return }
+        resortWorkItem?.cancel()
+        resortWorkItem = nil
+        FolderSizer.shared.cancelJobs(inside: currentPath)
     }
 
     // MARK: - View
@@ -123,24 +144,25 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         // and below it), so no rows scroll around the control.
         scopeBar.onVisibilityChange = { [weak self] visible in
             guard let self else { return }
-            self.contentTopToSafeArea.isActive = false
+            self.contentTopToEdge.isActive = false
             self.contentTopToScopeBar.isActive = false
             if visible {
                 self.contentTopToScopeBar.isActive = true
             } else {
-                self.contentTopToSafeArea.isActive = true
+                self.contentTopToEdge.isActive = true
             }
         }
-        // Below the toolbar, like Finder's list: nothing scrolls under it,
-        // so macOS draws no scroll edge line there.
-        contentTopToSafeArea = contentContainer.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
+        // Up to the window's top edge: the list scrolls under the toolbar with
+        // macOS's soft scroll edge effect, like Finder (its scroll view insets
+        // its content below the toolbar by itself).
+        contentTopToEdge = contentContainer.topAnchor.constraint(equalTo: root.topAnchor)
         contentTopToScopeBar = contentContainer.topAnchor.constraint(equalTo: scopeBar.bottomAnchor, constant: 8)
         contentToBar = contentContainer.bottomAnchor.constraint(equalTo: bottomBar.topAnchor)
         contentToBottom = contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         NSLayoutConstraint.activate([
             contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentTopToSafeArea,
+            contentTopToEdge,
             contentToBar,
             bottomBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -162,6 +184,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
 
         installContent(for: viewMode)
         let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(windowWillClose(_:)), name: NSWindow.willCloseNotification, object: nil)
         center.addObserver(self, selector: #selector(directoryDidUpdate(_:)), name: DirectoryStore.didUpdate, object: nil)
         center.addObserver(self, selector: #selector(prefsDidChange(_:)), name: Prefs.didChange, object: nil)
         center.addObserver(self, selector: #selector(operationDidFinish(_:)), name: FileOperationManager.didFinish, object: nil)
@@ -188,15 +211,36 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         NSLayoutConstraint.activate([
             controller.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             controller.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            controller.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
             controller.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
+        if mode == .list || mode == .icons {
+            controller.view.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        } else {
+            // Columns and the gallery set their own insets: they start below the toolbar.
+            let top = controller.view.topAnchor.constraint(equalTo: contentContainer.topAnchor)
+            top.priority = .defaultHigh
+            NSLayoutConstraint.activate([
+                top,
+                controller.view.topAnchor.constraint(greaterThanOrEqualTo: contentContainer.topAnchor),
+                controller.view.topAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.topAnchor),
+            ])
+        }
         content = controller
         if let list = controller as? ListViewController { list.isFlat = isSearchResults }
         bottomBar.showsIconSizeSlider = mode == .icons
     }
 
     // MARK: - Navigation
+
+    private var folderName: (path: String, name: String)?
+
+    var displayFolderName: String {
+        let path = displayedPath
+        if let folderName, folderName.path == path { return folderName.name }
+        let name = FileManager.default.displayName(atPath: path)
+        folderName = (path, name)
+        return name
+    }
 
     var displayTitle: String {
         if isSearchResults {
@@ -206,7 +250,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         let path = displayedPath
         if Prefs.showFullPathInTitle { return path }
         return path == "/" ? (VolumeMonitor.shared.volume(containing: "/")?.name ?? "/")
-            : FileManager.default.displayName(atPath: path)
+            : displayFolderName
     }
 
     /// The folder the title and path bar describe (column view: the deepest open column).
@@ -226,8 +270,13 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         if lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
             path = DirectoryReader.normalized(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
         }
-        if isSearchResults { endSearch(clearField: true) }
+        let wasResults = isSearchResults
+        if wasResults { endSearch(clearField: true, redisplay: false) }
         if path == currentPath {
+            if wasResults {
+                showListing(reset: true)
+                delegate?.paneDidChangeLocation(self)
+            }
             if !paths.isEmpty { selectPaths(Set(paths), scroll: true) }
             return
         }
@@ -242,8 +291,11 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
     private func setLocation(_ path: String, select paths: [String]) {
         if !currentPath.isEmpty {
             DirectoryStore.shared.endWatching(currentPath)
+            resortWorkItem?.cancel()
+            resortWorkItem = nil
             FolderSizer.shared.cancelJobs(inside: currentPath)
         }
+        folderName = nil
         currentPath = path
         DirectoryStore.shared.beginWatching(path)
         pendingSelection = Set(paths)
@@ -265,7 +317,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         DirectoryStore.shared.load(path)
         Prefs.noteVisited(path)
         delegate?.paneDidChangeLocation(self)
-        updateBottomBar()
+        if !listing.isLoaded { updateBottomBar() }
     }
 
     @objc func goBack(_ sender: Any?) {
@@ -303,6 +355,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         let path = DirectoryReader.normalized(rawPath)
         guard path != currentPath, !isSearchResults else { return }
         DirectoryStore.shared.endWatching(currentPath)
+        resortWorkItem?.cancel()
+        resortWorkItem = nil
+        FolderSizer.shared.cancelJobs(inside: currentPath)
+        folderName = nil
         currentPath = path
         DirectoryStore.shared.beginWatching(path)
         let listing = DirectoryStore.shared.listing(for: path)
@@ -319,7 +375,32 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
     // MARK: - Displaying
 
     func arrange(_ items: [FileItem]) -> [FileItem] {
-        ItemArranger.arrange(items, options: arrangeOptions)
+        guard arrangeOptions.sortKey == .size else {
+            return ItemArranger.arrange(items, options: arrangeOptions)
+        }
+        if Prefs.calculateFolderSizes {
+            // Sizes known from this session or an earlier one sort right away;
+            // fresh walks then only move the folders whose size changed.
+            let sizer = FolderSizer.shared
+            for item in items where item.computedFolderSize < 0 && (item.type == .directory || item.type == .package) {
+                if let bytes = sizer.cached(item.path)?.bytes ?? sizer.rememberedSize(item.path) {
+                    item.computedFolderSize = bytes
+                }
+            }
+        }
+        var names = arrangeOptions
+        names.sortKey = .name
+        names.ascending = true
+        let ordered = ItemArranger.arrange(items, options: names)
+        return ordered.enumerated().sorted { lhs, rhs in
+            let a = lhs.element, b = rhs.element
+            if arrangeOptions.foldersOnTop, (a.type == .directory) != (b.type == .directory) {
+                return a.type == .directory
+            }
+            let aSize = Double(max(0, a.displaySize)), bSize = Double(max(0, b.displaySize))
+            if aSize != bSize { return arrangeOptions.ascending ? aSize < bSize : aSize > bSize }
+            return lhs.offset < rhs.offset
+        }.map { $0.element }
     }
 
     private func showListing(reset: Bool) {
@@ -349,16 +430,19 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
 
     /// Re-sorts after background folder sizes arrive (coalesced).
     func scheduleResort() {
-        guard !resortScheduled else { return }
-        resortScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+        guard resortWorkItem == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.resortScheduled = false
+            self.resortWorkItem = nil
             self.rearrange()
         }
+        resortWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     func rearrange() {
+        // A view mode's view can ask before installContent has finished.
+        guard content != nil else { return }
         if isSearchResults {
             items = arrange(searchResults)
         } else if let listing {
@@ -566,7 +650,7 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
             content.appearanceSettingsDidChange()
         }
         bottomBar.syncIconSize(Prefs.iconSize)
-        updateBottomBar()
+        if !changed { updateBottomBar() }
         if changed { delegate?.paneDidChangeLocation(self) }
     }
 
@@ -700,6 +784,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
     }
 
     func endSearch(clearField: Bool) {
+        endSearch(clearField: clearField, redisplay: true)
+    }
+
+    private func endSearch(clearField: Bool, redisplay: Bool) {
         let wasResults = isSearchResults
         searchEngine?.cancel()
         searchEngine = nil
@@ -709,8 +797,10 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
         arrangeOptions.filter = ""
         if wasResults { restoreModeAfterSearch() }
         if clearField { NotificationCenter.default.post(name: .diskiClearSearchField, object: self) }
-        if wasResults { showListing(reset: true) } else { rearrange() }
-        delegate?.paneDidChangeLocation(self)
+        if redisplay {
+            if wasResults { showListing(reset: true) } else { rearrange() }
+            delegate?.paneDidChangeLocation(self)
+        }
     }
 
     // MARK: - Opening
@@ -1215,6 +1305,9 @@ final class PaneViewController: NSViewController, NSMenuItemValidation, NSMenuDe
             guard flags.isEmpty, !typeSelecting else { return false }
             quickLook(nil)
             return true
+        case 53: // Escape closes Quick Look, like Finder
+            guard flags.isEmpty else { return false }
+            return delegate?.paneRequestsQuickLookDismissal(self) ?? false
         case 48: // Tab
             guard flags.isEmpty || flags == .shift else { return false }
             return delegate?.paneRequestsFocusSwitch(self) ?? false

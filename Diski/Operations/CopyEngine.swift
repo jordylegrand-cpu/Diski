@@ -206,12 +206,15 @@ final class CopyEngine {
     private final class ProgressContext {
         let operation: FileOperation
         var reported: Int64 = 0
+        private var lastReport = DispatchTime.now().uptimeNanoseconds
         init(operation: FileOperation) { self.operation = operation }
 
         /// Returns false to abort the copy.
         func report(_ copied: Int64) -> Bool {
             let delta = copied - reported
-            if delta > 0 {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if delta > 0 && now - lastReport >= 100_000_000 {
+                lastReport = now
                 reported = copied
                 operation.update { $0.completedBytes += delta }
             }
@@ -303,7 +306,8 @@ final class CopyEngine {
     private final class TaskQueue {
         let condition = NSCondition()
         var directories: [Task] = []
-        var files: [Task] = []
+        var files: [Task?] = []
+        var fileHead = 0
         var inFlight = 0
         var directoriesInFlight = 0
         var finalize: [(String, String)] = []
@@ -313,6 +317,16 @@ final class CopyEngine {
             condition.lock()
             if case .directory = task { directories.append(task) } else { files.append(task) }
             condition.signal()
+            condition.unlock()
+        }
+
+        func push(contentsOf tasks: [Task]) {
+            guard !tasks.isEmpty else { return }
+            condition.lock()
+            for task in tasks {
+                if case .directory = task { directories.append(task) } else { files.append(task) }
+            }
+            condition.broadcast()
             condition.unlock()
         }
 
@@ -326,9 +340,16 @@ final class CopyEngine {
                     directoriesInFlight += 1
                     return task
                 }
-                if !files.isEmpty {
+                if fileHead < files.count {
+                    let task = files[fileHead]
+                    files[fileHead] = nil
+                    fileHead += 1
+                    if fileHead >= 1024 && fileHead * 2 >= files.count {
+                        files.removeFirst(fileHead)
+                        fileHead = 0
+                    }
                     inFlight += 1
-                    return files.removeFirst()
+                    return task
                 }
                 if inFlight == 0 { condition.broadcast(); return nil }
                 condition.wait()
@@ -401,11 +422,23 @@ final class CopyEngine {
         queue.finalize.append((src, dst))
         queue.condition.unlock()
 
+        var pendingTasks: [Task] = []
+        pendingTasks.reserveCapacity(256)
+        var cancellationChecks = 0
+        var continuing = true
         var discoveredBytes: Int64 = 0
         var discoveredFiles = 0
         var ok = true
         do {
-            try DirectoryReader.forEachRawEntry(inDirectory: src, buffer: buffer) { entry in
+            try DirectoryReader.forEachRawEntry(inDirectory: src, buffer: buffer,
+                                                 shouldContinue: {
+                                                     if cancellationChecks == 0 {
+                                                         continuing = self.operation.waitIfPaused()
+                                                         cancellationChecks = 256
+                                                     }
+                                                     cancellationChecks -= 1
+                                                     return continuing
+                                                 }) { entry in
                 let name = entry.nameString
                 let s = join(src, name)
                 let d = join(dst, name)
@@ -417,7 +450,7 @@ final class CopyEngine {
                         ok = false
                         return
                     }
-                    queue.push(.directory(src: s, dst: d, exists: dstExists))
+                    pendingTasks.append(.directory(src: s, dst: d, exists: dstExists))
                 } else {
                     if exists {
                         // Merging: files that already exist are replaced (the old one goes to the Trash).
@@ -433,13 +466,18 @@ final class CopyEngine {
                     }
                     discoveredBytes += entry.size
                     discoveredFiles += 1
-                    queue.push(.file(src: s, dst: d, size: entry.size, symlink: entry.isSymlink))
+                    pendingTasks.append(.file(src: s, dst: d, size: entry.size, symlink: entry.isSymlink))
+                }
+                if pendingTasks.count >= 256 {
+                    queue.push(contentsOf: pendingTasks)
+                    pendingTasks.removeAll(keepingCapacity: true)
                 }
             }
         } catch {
             recordError("Folder “\((src as NSString).lastPathComponent)” couldn’t be read: \(error.localizedDescription)")
             ok = false
         }
+        queue.push(contentsOf: pendingTasks)
         if discoveredBytes > 0 || discoveredFiles > 0 {
             operation.update {
                 $0.totalBytes += discoveredBytes

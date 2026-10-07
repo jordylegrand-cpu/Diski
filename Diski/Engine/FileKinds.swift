@@ -10,6 +10,14 @@ enum FileKinds {
     private static var typeByKey: [String: UTType] = [:]
     private static var traitsByKey: [String: Traits] = [:]
 
+    private static let maxCachedKeys = 4096
+
+    static func preparationKey(for item: FileItem) -> String {
+        if item.isAlias { return "/alias" }
+        let executable = item.ext.isEmpty && item.type == .file && (item.mode & 0o111) != 0
+        return (item.type == .package ? "/" : "") + item.ext + (executable ? "//x" : "")
+    }
+
     /// The type checks the views make per cell, answered once per file key.
     private struct Traits: OptionSet {
         let rawValue: UInt8
@@ -29,7 +37,7 @@ enum FileKinds {
         lock.unlock()
         let isPackage = UTType(filenameExtension: ext, conformingTo: .directory)?.conforms(to: .package) ?? false
         lock.lock()
-        packageByExt[ext] = isPackage
+        if packageByExt.count < maxCachedKeys { packageByExt[ext] = isPackage }
         lock.unlock()
         return isPackage
     }
@@ -45,9 +53,7 @@ enum FileKinds {
             return .item
         case .file, .package:
             if item.isAlias { return .aliasFile }
-            // Extension-less files differ by their executable bit ("//x", as in kind(for:)).
-            let executable = item.ext.isEmpty && item.type == .file && (item.mode & 0o111) != 0
-            let key = (item.type == .package ? "/" : "") + item.ext + (executable ? "//x" : "")
+            let key = preparationKey(for: item)
             lock.lock()
             if let cached = typeByKey[key] { lock.unlock(); return cached }
             lock.unlock()
@@ -60,7 +66,7 @@ enum FileKinds {
                 type = UTType(filenameExtension: item.ext) ?? .data
             }
             lock.lock()
-            typeByKey[key] = type
+            if typeByKey.count < maxCachedKeys { typeByKey[key] = type }
             lock.unlock()
             return type
         }
@@ -79,7 +85,7 @@ enum FileKinds {
             if item.isAlias { return "Alias" }
             let executable = item.ext.isEmpty && item.type == .file && (item.mode & 0o111) != 0
             // "//x" cannot collide with an extension: extensions never contain "/".
-            let key = (item.type == .package ? "/" : "") + item.ext + (executable ? "//x" : "")
+            let key = preparationKey(for: item)
             lock.lock()
             if let cached = kindByKey[key] { lock.unlock(); return cached }
             lock.unlock()
@@ -97,10 +103,15 @@ enum FileKinds {
                 }
             }
             lock.lock()
-            kindByKey[key] = kind
+            if kindByKey.count < maxCachedKeys { kindByKey[key] = kind }
             lock.unlock()
             return kind
         }
+    }
+
+    static func prepare(for item: FileItem) {
+        _ = kind(for: item)
+        if item.type == .file { _ = traits(of: item) }
     }
 
     static func isImage(_ item: FileItem) -> Bool { item.type == .file && traits(of: item).contains(.image) }
@@ -137,7 +148,7 @@ enum FileKinds {
             traits.insert(.thumbnail)
         }
         lock.lock()
-        traitsByKey[key] = traits
+        if traitsByKey.count < maxCachedKeys { traitsByKey[key] = traits }
         lock.unlock()
         return traits
     }

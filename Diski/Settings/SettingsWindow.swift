@@ -67,10 +67,17 @@ final class SettingsModel: ObservableObject {
     @Published var benchmark = ""
     @Published var benchmarking = false
     private var observer: NSObjectProtocol?
+    private var refreshScheduled = false
 
     init() {
         observer = NotificationCenter.default.addObserver(forName: Prefs.didChange, object: nil, queue: .main) { [weak self] _ in
-            self?.refresh()
+            guard let self, !self.refreshScheduled else { return }
+            self.refreshScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.refreshScheduled = false
+                self.refresh()
+            }
         }
     }
 

@@ -25,6 +25,12 @@ final class SearchEngine: NSObject {
     private let maxResults = 5000
     /// Spotlight results already read while the query gathers.
     private var gatheredCount = 0
+    private var scheduledPaths = Set<String>()
+    private var pendingResults: [FileItem] = []
+    private var deliveryScheduled = false
+    private var deliveryGeneration = 0
+    private var lastDelivery = DispatchTime.now().uptimeNanoseconds
+    private enum WalkStopped: Error { case stopped }
     /// Builds Spotlight result items (lstat, xattrs) off the main thread, in order.
     private let itemQueue = DispatchQueue(label: "app.diski.search.items", qos: .userInitiated)
 
@@ -102,18 +108,18 @@ final class SearchEngine: NSObject {
 
             func flush(force: Bool) {
                 condition.lock()
-                guard force || Date().timeIntervalSince(lastFlush) > 0.15, !found.isEmpty else {
+                guard force || Date().timeIntervalSince(lastFlush) > 0.1, !found.isEmpty else {
                     condition.unlock()
                     return
                 }
                 let batch = found
                 found = []
                 lastFlush = Date()
-                condition.unlock()
                 DispatchQueue.main.async {
                     guard !self.isCancelled else { return }
                     self.append(batch, done: false)
                 }
+                condition.unlock()
             }
 
             DispatchQueue.concurrentPerform(iterations: workers) { _ in
@@ -135,39 +141,79 @@ final class SearchEngine: NSObject {
                     var matches: [FileItem] = []
                     let reader = buffer ?? DirectoryReader.Buffer()
                     buffer = reader
-                    // Only folders (to recurse into) and matching names become items.
+                    var lastPublish = DispatchTime.now().uptimeNanoseconds
+                    var visited = 0
+                    var stopped = false
+                    func publishMatches() {
+                        condition.lock()
+                        let remaining = max(0, limit - total)
+                        found.append(contentsOf: matches.prefix(remaining))
+                        total += min(remaining, matches.count)
+                        stopped = total >= limit
+                        condition.unlock()
+                        matches.removeAll(keepingCapacity: true)
+                        lastPublish = DispatchTime.now().uptimeNanoseconds
+                        flush(force: false)
+                    }
+                    // Detailed entries retain Finder hidden flags and package boundaries.
                     try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true, buffer: reader,
                                                       include: { name, type in
-                                                          type == DirectoryReader.vDIR || matcher.matches(cString: name)
+                                                          visited += 1
+                                                          if visited & 255 == 0 { stopped = stopped || self.isCancelled }
+                                                          return stopped || type == DirectoryReader.vDIR || matcher.matches(cString: name)
                                                       }) { item in
+                        if stopped || self.isCancelled { throw WalkStopped.stopped }
                         if !showHidden && item.isHidden { return }
                         if !item.isDirectoryOnDisk || matcher.matches(item) { matches.append(item) }
                         if item.type == .directory && !item.isMountPoint { subdirectories.append(item.path) }
+                        if !matches.isEmpty && DispatchTime.now().uptimeNanoseconds - lastPublish >= 100_000_000 {
+                            publishMatches()
+                        }
                     }
 
+                    publishMatches()
                     condition.lock()
                     stack.append(contentsOf: subdirectories)
-                    found.append(contentsOf: matches)
-                    total += matches.count
                     active -= 1
                     condition.broadcast()
                     condition.unlock()
-                    if !matches.isEmpty { flush(force: false) }
+                    flush(force: false)
                 }
             }
             flush(force: true)
             DispatchQueue.main.async {
                 guard !self.isCancelled else { return }
                 self.isRunning = false
-                self.handler(self.results, true)
+                self.append([], done: true)
             }
         }
     }
 
     private func append(_ batch: [FileItem], done: Bool) {
-        for item in batch where results.count < maxResults {
+        pendingResults.append(contentsOf: batch)
+        if done {
+            deliver(done: true)
+        } else if !deliveryScheduled {
+            deliveryScheduled = true
+            deliveryGeneration += 1
+            let generation = deliveryGeneration
+            let elapsed = DispatchTime.now().uptimeNanoseconds - lastDelivery
+            let delay = elapsed >= 100_000_000 ? 0 : Double(100_000_000 - elapsed) / 1_000_000_000
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !self.isCancelled, self.deliveryScheduled, self.deliveryGeneration == generation else { return }
+                self.deliver(done: false)
+            }
+        }
+    }
+
+    private func deliver(done: Bool) {
+        deliveryScheduled = false
+        deliveryGeneration += 1
+        for item in pendingResults where results.count < maxResults {
             if seen.insert(item.path).inserted { results.append(item) }
         }
+        pendingResults.removeAll(keepingCapacity: true)
+        lastDelivery = DispatchTime.now().uptimeNanoseconds
         handler(results, done)
     }
 
@@ -177,7 +223,7 @@ final class SearchEngine: NSObject {
         let query = NSMetadataQuery()
         query.predicate = predicate
         query.searchScopes = scopes
-        query.notificationBatchingInterval = 0.2
+        query.notificationBatchingInterval = 0.1
         self.query = query
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(queryUpdated(_:)), name: .NSMetadataQueryDidUpdate, object: query)
@@ -209,7 +255,7 @@ final class SearchEngine: NSObject {
         for index in first..<max(first, total) {
             if let item = query.result(at: index) as? NSMetadataItem,
                let path = item.value(forAttribute: NSMetadataItemPathKey) as? String,
-               !seen.contains(path) {
+               !seen.contains(path), scheduledPaths.insert(path).inserted {
                 paths.append(path)
             }
         }
@@ -218,13 +264,20 @@ final class SearchEngine: NSObject {
         guard !paths.isEmpty || done else { return }
         // The serial queue keeps batches in order, so `done` always arrives last.
         itemQueue.async { [weak self] in
-            let items = paths.compactMap { FileItem.make(path: $0) }
+            guard let self, !self.isCancelled else { return }
+            var items: [FileItem] = []
+            var failedPaths: [String] = []
+            items.reserveCapacity(paths.count)
+            for path in paths {
+                guard !self.isCancelled else { return }
+                if let item = FileItem.make(path: path) { items.append(item) }
+                else { failedPaths.append(path) }
+            }
             DispatchQueue.main.async {
-                guard let self, !self.isCancelled, !items.isEmpty || done else { return }
-                for item in items where self.results.count < self.maxResults {
-                    if self.seen.insert(item.path).inserted { self.results.append(item) }
-                }
-                self.handler(self.results, done)
+                guard !self.isCancelled else { return }
+                for path in failedPaths { self.scheduledPaths.remove(path) }
+                guard !items.isEmpty || done else { return }
+                self.append(items, done: done)
             }
         }
     }

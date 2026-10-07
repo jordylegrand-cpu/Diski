@@ -107,6 +107,9 @@ enum DirectoryReader {
         let objectType: UInt32
         let size: Int64
         let isMountPoint: Bool
+        let flags: UInt32
+
+        var isDataless: Bool { flags & 0x4000_0000 != 0 }
 
         var isDirectory: Bool { objectType == DirectoryReader.vDIR }
         var isSymlink: Bool { objectType == DirectoryReader.vLNK }
@@ -116,7 +119,8 @@ enum DirectoryReader {
 
     /// The fastest possible listing: name, type, size and mount status only.
     /// Used by recursive size calculation and the copy engine's tree scan.
-    static func forEachRawEntry(inDirectory rawPath: String, buffer: Buffer? = nil, _ body: (RawEntry) -> Void) throws {
+    static func forEachRawEntry(inDirectory rawPath: String, buffer: Buffer? = nil,
+                                shouldContinue: (() -> Bool)? = nil, _ body: (RawEntry) -> Void) throws {
         let path = normalized(rawPath)
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw ReadError(path: path, code: errno) }
@@ -124,14 +128,14 @@ enum DirectoryReader {
 
         var request = attrlist()
         request.bitmapcount = 5
-        request.commonattr = cmnReturnedAttrs | cmnError | cmnName | cmnObjType
+        request.commonattr = cmnReturnedAttrs | cmnError | cmnName | cmnObjType | cmnFlags
         request.dirattr = dirMountStatus
         request.fileattr = fileTotalSize
 
         let storage = buffer ?? Buffer()
         defer { withExtendedLifetime(storage) {} }
 
-        while true {
+        while shouldContinue?() ?? true {
             let count = getattrlistbulk(fd, &request, storage.pointer, storage.size, 0)
             if count < 0 {
                 if errno == EINTR { continue }
@@ -140,6 +144,7 @@ enum DirectoryReader {
             if count == 0 { break }
             var entry = UnsafeRawPointer(storage.pointer)
             for _ in 0..<Int(count) {
+                guard shouldContinue?() ?? true else { return }
                 let length = Int(entry.loadUnaligned(as: UInt32.self))
                 var field = entry.advanced(by: 4)
                 let returned = field.loadUnaligned(as: attribute_set_t.self)
@@ -160,6 +165,11 @@ enum DirectoryReader {
                     objectType = field.loadUnaligned(as: UInt32.self)
                     field = field.advanced(by: 4)
                 }
+                var flags: UInt32 = 0
+                if returned.commonattr & cmnFlags != 0 {
+                    flags = field.loadUnaligned(as: UInt32.self)
+                    field = field.advanced(by: 4)
+                }
                 var isMount = false
                 if returned.dirattr & dirMountStatus != 0 {
                     isMount = field.loadUnaligned(as: UInt32.self) & 0x1 != 0
@@ -171,15 +181,20 @@ enum DirectoryReader {
                     field = field.advanced(by: 8)
                 }
                 if let namePointer, !failed || objectType != 0 {
-                    body(RawEntry(name: namePointer, objectType: objectType, size: size, isMountPoint: isMount))
+                    body(RawEntry(name: namePointer, objectType: objectType, size: size, isMountPoint: isMount, flags: flags))
                 }
                 entry = entry.advanced(by: length)
             }
         }
     }
 
+    static func isDataless(_ path: String) -> Bool {
+        var metadata = stat()
+        return lstat(path, &metadata) == 0 && metadata.st_flags & 0x4000_0000 != 0
+    }
+
     static func normalized(_ path: String) -> String {
-        if path.utf8.count > 1 && path.utf8.last == UInt8(ascii: "/") { return String(path.dropLast()) }
+        if path != "/" && path.utf8.last == UInt8(ascii: "/") { return String(path.dropLast()) }
         return path.isEmpty ? "/" : path
     }
 

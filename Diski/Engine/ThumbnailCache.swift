@@ -9,12 +9,15 @@ final class ThumbnailCache {
 
     private let cache = NSCache<NSString, NSImage>()
     private var requests: [String: QLThumbnailGenerator.Request] = [:]
-    private var waiting: [String: [(NSImage?) -> Void]] = [:]
+    private var waiting: [String: [String: (NSImage?) -> Void]] = [:]
+    private var subscriptions: [String: String] = [:]
     /// Keys that produced no thumbnail, so they are not asked for again.
-    private var failed = Set<String>()
+    private let failed = NSCache<NSString, NSNumber>()
+    private let decodeQueue = DispatchQueue(label: "app.diski.thumbnail-decode", qos: .userInitiated, attributes: .concurrent)
 
     private init() {
         cache.totalCostLimit = 256 * 1024 * 1024
+        failed.countLimit = 4000
     }
 
     static func bucket(for points: CGFloat) -> Int {
@@ -44,7 +47,7 @@ final class ThumbnailCache {
     }
 
     func hasFailed(_ item: FileItem, points: CGFloat, iconMode: Bool = false) -> Bool {
-        failed.contains(key(for: item, bucket: Self.bucket(for: points), iconMode: iconMode))
+        failed.object(forKey: key(for: item, bucket: Self.bucket(for: points), iconMode: iconMode) as NSString) != nil
     }
 
     /// Requests a thumbnail. Returns a token for `cancel(_:)`. `completion` runs on the main thread.
@@ -59,15 +62,17 @@ final class ThumbnailCache {
             completion(image)
             return nil
         }
-        if failed.contains(k) {
+        if failed.object(forKey: k as NSString) != nil {
             completion(nil)
             return nil
         }
+        let token = UUID().uuidString
+        subscriptions[token] = k
         if waiting[k] != nil {
-            waiting[k]?.append(completion)
-            return k
+            waiting[k]?[token] = completion
+            return token
         }
-        waiting[k] = [completion]
+        waiting[k] = [token: completion]
         let request = QLThumbnailGenerator.Request(fileAt: item.url,
                                                    size: CGSize(width: b, height: b),
                                                    scale: max(scale, 1),
@@ -75,37 +80,57 @@ final class ThumbnailCache {
         request.iconMode = iconMode
         requests[k] = request
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] representation, _ in
-            let image = representation?.nsImage
-            DispatchQueue.main.async {
-                guard let self else { return }
-                // A cancelled (or superseded) request still calls back; ignore its failure.
-                let isCurrent = self.requests[k] === request
-                if isCurrent { self.requests.removeValue(forKey: k) }
-                if let image {
-                    let pixels = Int(image.size.width * image.size.height * 4 * scale * scale)
-                    self.cache.setObject(image, forKey: k as NSString, cost: pixels)
-                } else if isCurrent {
-                    self.failed.insert(k)
+            self?.decodeQueue.async {
+                let image = representation.map { Self.decodedImage($0.cgImage, size: $0.nsImage.size) }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // A cancelled (or superseded) request still calls back; ignore its failure.
+                    let isCurrent = self.requests[k] === request
+                    if isCurrent { self.requests.removeValue(forKey: k) }
+                    if let image {
+                        let pixels = Int(image.size.width * image.size.height * 4 * scale * scale)
+                        self.cache.setObject(image, forKey: k as NSString, cost: pixels)
+                    } else if isCurrent {
+                        self.failed.setObject(NSNumber(value: true), forKey: k as NSString)
+                    }
+                    guard isCurrent else { return }
+                    let callbacks = self.waiting.removeValue(forKey: k) ?? [:]
+                    for (token, callback) in callbacks {
+                        self.subscriptions.removeValue(forKey: token)
+                        callback(image)
+                    }
                 }
-                guard isCurrent else { return }
-                let callbacks = self.waiting.removeValue(forKey: k) ?? []
-                for callback in callbacks { callback(image) }
             }
         }
-        return k
+        return token
+    }
+
+    private static func decodedImage(_ source: CGImage, size: NSSize) -> NSImage {
+        // Keeps the thumbnail's own colour space (Display P3 photos stay P3).
+        let space = source.colorSpace.flatMap { $0.model == .rgb && $0.supportsOutput ? $0 : nil }
+            ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(data: nil, width: source.width, height: source.height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return NSImage(cgImage: source, size: size)
+        }
+        context.draw(source, in: CGRect(x: 0, y: 0, width: CGFloat(source.width), height: CGFloat(source.height)))
+        return NSImage(cgImage: context.makeImage() ?? source, size: size)
     }
 
     func cancel(_ token: String?) {
-        guard let token, let request = requests[token] else { return }
-        // Only cancel when nobody else is waiting for the same thumbnail.
-        if (waiting[token]?.count ?? 0) <= 1 {
+        guard let token, let key = subscriptions.removeValue(forKey: token) else { return }
+        waiting[key]?.removeValue(forKey: token)
+        guard waiting[key]?.isEmpty == true else { return }
+        waiting.removeValue(forKey: key)
+        if let request = requests.removeValue(forKey: key) {
             QLThumbnailGenerator.shared.cancel(request)
-            requests.removeValue(forKey: token)
-            waiting.removeValue(forKey: token)
         }
     }
 
     func invalidate(path: String) {
-        failed = failed.filter { !$0.hasPrefix(path + "|") }
+        // NSCache does not enumerate keys; discard bounded negative results on invalidation.
+        failed.removeAllObjects()
     }
 }

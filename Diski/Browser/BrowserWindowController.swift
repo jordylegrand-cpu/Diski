@@ -16,7 +16,7 @@ extension NSToolbarItem.Identifier {
     static let diskiTrash = NSToolbarItem.Identifier("app.diski.trash")
     static let diskiTerminal = NSToolbarItem.Identifier("app.diski.terminal")
     static let diskiGetInfo = NSToolbarItem.Identifier("app.diski.getinfo")
-    static let diskiPreview = NSToolbarItem.Identifier("app.diski.preview")
+    static let diskiPreviewPane = NSToolbarItem.Identifier("app.diski.preview")
 }
 
 /// Holds one or two panes side by side.
@@ -36,19 +36,35 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
         splitView.delegate = self
         splitView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(splitView)
+        let fullHeight = splitView.topAnchor.constraint(equalTo: root.topAnchor)
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            // Below the toolbar: the dual-pane divider must not cut through it.
-            splitView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            fullHeight,
             splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        topToEdge = fullHeight
+        topBelowToolbar = splitView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
         view = root
+        updateTopConstraint()
+    }
+
+    /// One pane scrolls under the toolbar; two start below it, so the
+    /// divider between them does not cut through the toolbar.
+    private var topToEdge: NSLayoutConstraint?
+    private var topBelowToolbar: NSLayoutConstraint?
+
+    private func updateTopConstraint() {
+        guard let topToEdge, let topBelowToolbar else { return }
+        let dual = panes.count > 1
+        NSLayoutConstraint.deactivate(dual ? [topToEdge] : [topBelowToolbar])
+        NSLayoutConstraint.activate(dual ? [topBelowToolbar] : [topToEdge])
     }
 
     func add(_ pane: PaneViewController) {
         addChild(pane)
         panes.append(pane)
+        updateTopConstraint()
         splitView.addArrangedSubview(pane.view)
         splitView.adjustSubviews()
         equalize()
@@ -60,6 +76,7 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
         pane.view.removeFromSuperview()
         pane.removeFromParent()
         panes.removeAll { $0 === pane }
+        updateTopConstraint()
         // The remaining pane fills the container now, not at the next resize.
         splitView.adjustSubviews()
         sharedWidth = 0
@@ -98,6 +115,24 @@ final class PaneContainerViewController: NSViewController, NSSplitViewDelegate {
     }
 }
 
+private final class InspectorContainerViewController: NSViewController {
+    override func loadView() { view = NSView() }
+
+    func install(_ inspector: InspectorViewController) {
+        guard inspector.parent !== self else { return }
+        addChild(inspector)
+        let content = inspector.view
+        content.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            content.topAnchor.constraint(equalTo: view.topAnchor),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+    }
+}
+
 /// A Diski browser window (or tab): sidebar, one or two panes, inspector,
 /// and the Liquid Glass toolbar.
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
@@ -107,7 +142,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     let splitController = NSSplitViewController()
     let sidebar = SidebarViewController()
     let paneContainer = PaneContainerViewController()
-    let inspector = InspectorViewController()
+    private(set) lazy var inspector = InspectorViewController()
+    private let inspectorContainer = InspectorContainerViewController()
     private var sidebarItem: NSSplitViewItem!
     private var inspectorItem: NSSplitViewItem!
     private(set) var activePane: PaneViewController!
@@ -123,9 +159,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     private weak var backItem: NSToolbarItem?
     private weak var forwardItem: NSToolbarItem?
     private weak var viewModeGroup: NSToolbarItemGroup?
+    private weak var previewPaneGroup: NSToolbarItemGroup?
     private weak var searchItem: NSSearchToolbarItem?
     private weak var operationsItem: NSToolbarItem?
-    private let operationsView = OperationsToolbarView()
+    private lazy var operationsView = OperationsToolbarView()
+
+    /// The toolbar's progress item, when this window shows it (for the operations popover).
+    var operationsAnchor: NSView? {
+        guard let window, window.isVisible, operationsItem?.isHidden == false,
+              operationsView.window === window else { return nil }
+        return operationsView
+    }
     private var previewItems: [URL] = []
 
     var panes: [PaneViewController] { paneContainer.panes }
@@ -151,6 +195,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         sidebarItem.minimumThickness = 172
         sidebarItem.maximumThickness = 320
         sidebarItem.canCollapse = true
+        // Only the user shows and hides the sidebar: AppKit would hide it when the
+        // window gets narrow and bring it back by itself when it widens again.
+        sidebarItem.canCollapseFromWindowResize = false
         // Finder's sidebar has no line under the title bar.
         sidebarItem.titlebarSeparatorStyle = .none
         let contentItem = NSSplitViewItem(viewController: paneContainer)
@@ -158,11 +205,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         contentItem.titlebarSeparatorStyle = .none
         // The same full-height pane as the sidebar, on the trailing edge, so the
         // toolbar area above it is one surface with it (like Finder's preview).
-        inspectorItem = NSSplitViewItem(sidebarWithViewController: inspector)
+        inspectorItem = NSSplitViewItem(sidebarWithViewController: inspectorContainer)
         inspectorItem.minimumThickness = 200
         inspectorItem.maximumThickness = 380
         inspectorItem.titlebarSeparatorStyle = .none
         inspectorItem.canCollapse = true
+        inspectorItem.canCollapseFromWindowResize = false
         inspectorItem.isCollapsed = !Prefs.showInspector
         splitController.addSplitViewItem(sidebarItem)
         splitController.addSplitViewItem(contentItem)
@@ -206,6 +254,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         updateInspector()
         // Revealing the preview pane by dragging its edge refreshes it too.
         inspectorCollapseObservation = inspectorItem.observe(\.isCollapsed, options: [.new]) { [weak self] item, _ in
+            self?.updatePreviewPaneToolbarState()
             if !item.isCollapsed { self?.updateInspector(force: true) }
         }
     }
@@ -332,11 +381,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         previewPaneHiddenForColumns = hide
         let collapse = hide || !Prefs.showInspector
         if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
+        updatePreviewPaneToolbarState()
     }
 
     private func applyPreviewPaneSetting() {
         let collapse = previewPaneHiddenForColumns || !Prefs.showInspector
         if inspectorItem.isCollapsed != collapse { inspectorItem.isCollapsed = collapse }
+        updatePreviewPaneToolbarState()
     }
 
     func paneRequestsFocusSwitch(_ pane: PaneViewController) -> Bool {
@@ -354,12 +405,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         toggleQuickLook()
     }
 
+    func paneRequestsQuickLookDismissal(_ pane: PaneViewController) -> Bool {
+        guard QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible else { return false }
+        panel.orderOut(nil)
+        return true
+    }
+
     func paneRequestsInspector(_ pane: PaneViewController) {
         updateInspector(force: true)
         if inspectorItem.isCollapsed {
             inspectorItem.animator().isCollapsed = false
             Prefs.showInspector = true
         }
+        updatePreviewPaneToolbarState()
     }
 
     // MARK: - Sidebar
@@ -396,7 +454,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let window else { return }
         let title = activePane.displayTitle
         if window.title != title { window.title = title }
-        let name = activePane.isSearchResults ? title : FileManager.default.displayName(atPath: activePane.displayedPath)
+        let name = activePane.isSearchResults ? title : activePane.displayFolderName
         if window.tab.title != name { window.tab.title = name }
     }
 
@@ -407,11 +465,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         if forwardItem?.isEnabled != forward { forwardItem?.isEnabled = forward }
         let mode = activePane.viewMode.rawValue
         if let group = viewModeGroup, group.selectedIndex != mode { group.selectedIndex = mode }
+        updatePreviewPaneToolbarState()
+    }
+
+    private func updatePreviewPaneToolbarState() {
+        previewPaneGroup?.setSelected(!inspectorItem.isCollapsed, at: 0)
     }
 
     /// Skipped while the preview pane is collapsed; every reveal path forces it.
     private func updateInspector(force: Bool = false) {
         guard force || !inspectorItem.isCollapsed else { return }
+        inspectorContainer.install(inspector)
         inspector.compact = activePane.viewMode == .gallery
         let selection = activePane.selectedItems
         if selection.isEmpty {
@@ -466,16 +530,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         }
         // In column view the pane is only shown for now; the setting stays as it is.
         if !previewPaneHiddenForColumns { Prefs.showInspector = !collapse }
+        updatePreviewPaneToolbarState()
     }
 
     @objc func togglePathBar(_ sender: Any?) {
         Prefs.showPathBar.toggle()
-        for pane in panes { pane.updateBottomBar() }
     }
 
     @objc func toggleStatusInfo(_ sender: Any?) {
         Prefs.showStatusInfo.toggle()
-        for pane in panes { pane.updateBottomBar() }
     }
 
     @objc func focusSearch(_ sender: Any?) {
@@ -509,7 +572,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     @objc func showOperations(_ sender: Any?) {
-        ProgressWindowController.shared.present()
+        ProgressWindowController.shared.present(anchor: operationsAnchor)
     }
 
     // MARK: - Search field
@@ -550,6 +613,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     // MARK: - Operations feedback
 
     @objc private func operationsChanged() {
+        guard operationsItem != nil else { return }
         operationsView.update(with: FileOperationManager.shared.operations)
         if let item = operationsItem {
             let shouldHide = FileOperationManager.shared.operations.isEmpty
@@ -614,11 +678,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: QLPreviewItem!) -> NSRect {
-        guard let url = item?.previewItemURL ?? nil,
-              let file = activePane.selectedItems.first(where: { $0.url == url }) ?? activePane.items.first(where: { $0.url == url }) else {
-            return .zero
-        }
+        guard let file = previewFile(for: item) else { return .zero }
         return activePane.content.iconScreenRect(for: file) ?? .zero
+    }
+
+    /// The image the panel zooms from and back into: the icon or thumbnail the
+    /// row shows. Without it Quick Look morphs a blank (black) snapshot.
+    func previewPanel(_ panel: QLPreviewPanel!, transitionImageFor item: QLPreviewItem!,
+                      contentRect: UnsafeMutablePointer<NSRect>!) -> Any! {
+        guard let file = previewFile(for: item) else { return nil }
+        return activePane.content.iconImage(for: file)
+            ?? ThumbnailCache.shared.cached(for: file, points: 32, iconMode: true)
+            ?? IconCache.shared.cachedItemIcon(path: file.path)
+            ?? IconCache.shared.immediateIcon(for: file)
+    }
+
+    private func previewFile(for item: QLPreviewItem?) -> FileItem? {
+        guard let url = item?.previewItemURL ?? nil else { return nil }
+        return activePane.selectedItems.first(where: { $0.url == url }) ?? activePane.items.first(where: { $0.url == url })
     }
 
     // MARK: - Menu validation
@@ -655,6 +732,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard let pane = activePane else { return false }
         if item === backItem || item.action == #selector(goBack(_:)) { return pane.canGoBack }
         if item === forwardItem || item.action == #selector(goForward(_:)) { return pane.canGoForward }
+        if item.action == #selector(togglePreviewPane(_:)) {
+            updatePreviewPaneToolbarState()
+            return true
+        }
         return true
     }
 
@@ -685,18 +766,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.sidebarTrackingSeparator, .diskiNavigation, .flexibleSpace, .diskiOperations, .diskiAirDrop,
-         .diskiViewMode, .diskiGroup, .diskiShare, .diskiTags, .diskiAction, .diskiSearch]
+         .diskiViewMode, .diskiGroup, .diskiShare, .diskiTags, .diskiAction, .diskiPreviewPane, .diskiSearch]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.sidebarTrackingSeparator, .diskiNavigation, .diskiOperations, .diskiAirDrop, .diskiViewMode,
          .diskiGroup, .diskiShare, .diskiTags, .diskiAction, .diskiSearch, .diskiDualPane, .diskiNewFolder,
-         .diskiTrash, .diskiTerminal, .diskiGetInfo, .diskiPreview, .flexibleSpace, .space]
+         .diskiTrash, .diskiTerminal, .diskiGetInfo, .diskiPreviewPane, .flexibleSpace, .space]
     }
+
+    private static var symbolImages: [String: NSImage] = [:]
 
     private func symbol(_ names: String..., label: String) -> NSImage? {
         for name in names {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: label) { return image }
+            let key = name + ":" + label
+            if let image = Self.symbolImages[key] { return image }
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: label) {
+                Self.symbolImages[key] = image
+                return image
+            }
         }
         return nil
     }
@@ -759,7 +847,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             group.paletteLabel = "View"
             group.controlRepresentation = .expanded
             group.selectedIndex = activePane?.viewMode.rawValue ?? 1
-            viewModeGroup = group
+            if flag { viewModeGroup = group }
             return group
 
         case .diskiGroup:
@@ -817,7 +905,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             item.searchField.placeholderString = "Search"
             item.searchField.sendsSearchStringImmediately = true
             item.resignsFirstResponderWithCancel = true
-            searchItem = item
+            if flag { searchItem = item }
             return item
 
         case .diskiOperations:
@@ -829,7 +917,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
             item.view = operationsView
             item.isBordered = false
             item.isHidden = FileOperationManager.shared.operations.isEmpty
-            operationsItem = item
+            if flag { operationsItem = item }
             return item
 
         case .diskiDualPane:
@@ -847,9 +935,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSToo
         case .diskiGetInfo:
             return button(itemIdentifier, label: "Get Info", symbol: symbol("info.circle", label: "Get Info"),
                           action: #selector(PaneViewController.getInfo(_:)))
-        case .diskiPreview:
-            return button(itemIdentifier, label: "Preview", symbol: symbol("sidebar.trailing", "sidebar.right", label: "Preview"),
-                          action: #selector(togglePreviewPane(_:)), target: self)
+        case .diskiPreviewPane:
+            let images = [symbol("sidebar.trailing", "sidebar.right", label: "Preview")].compactMap { $0 }
+            let group = NSToolbarItemGroup(itemIdentifier: itemIdentifier, images: images, selectionMode: .selectAny,
+                                           labels: ["Preview"], target: self, action: #selector(togglePreviewPane(_:)))
+            group.label = "Preview"
+            group.paletteLabel = "Preview"
+            group.toolTip = "Show or hide the preview pane"
+            group.isBordered = true
+            group.controlRepresentation = .expanded
+            group.setSelected(!inspectorItem.isCollapsed, at: 0)
+            group.subitems.first?.toolTip = group.toolTip
+            if flag { previewPaneGroup = group }
+            return group
         default:
             return nil
         }

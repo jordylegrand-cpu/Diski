@@ -24,6 +24,11 @@ final class BottomBarView: NSView {
     /// NSPathControlItem.url is read-only, so clicks and drops map by index.
     private var shownPath: String?
     private var componentPaths: [String] = []
+    private var componentDirectories: [Bool] = []
+    private var componentDropTargets: [Bool] = []
+    private static let componentQueue = DispatchQueue(label: "app.diski.path-components", qos: .userInitiated)
+    private var componentTitleWidths: [CGFloat] = []
+    private var statusWidths: [String: CGFloat] = [:]
     private static var componentCache: [String: (title: String, image: NSImage)] = [:]
     /// Status texts from most to least detailed; the longest one that fits is shown.
     private var statusVariants: [String] = []
@@ -109,9 +114,7 @@ final class BottomBarView: NSView {
               let i = cell.pathComponentCells.firstIndex(where: { $0 === component }), i < componentPaths.count
         else { return nil }
         let path = componentPaths[i]
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue,
-              !NSWorkspace.shared.isFilePackage(atPath: path) else { return nil }
+        guard i < componentDropTargets.count, componentDropTargets[i] else { return nil }
         let frame = cell.rect(of: component, withFrame: pathControl.bounds, in: pathControl)
         return (DirectoryReader.normalized(path), convert(frame, from: pathControl))
     }
@@ -158,7 +161,9 @@ final class BottomBarView: NSView {
             fitStatus()
             return
         }
-        let root = VolumeMonitor.shared.volume(containing: path)?.path ?? "/"
+        let volume = VolumeMonitor.shared.volume(containing: path)
+        let root = volume?.path ?? "/"
+        let rootTitle = volume?.name
         var paths: [String] = []
         var current = path
         while true {
@@ -167,17 +172,34 @@ final class BottomBarView: NSView {
             current = (current as NSString).deletingLastPathComponent
         }
         paths.reverse()
-        componentPaths = paths
-        let lastIndex = paths.count - 1
-        components = paths.enumerated().map { index, p in
-            if index == lastIndex, index > 0, let lastIcon {
-                // The selection: no NSWorkspace lookup and no cache entry per arrow key.
-                return (title: FileManager.default.displayName(atPath: p), image: Self.sized(lastIcon))
+        let requestedPaths = paths
+        let selectedIcon = lastIcon.map { Self.sized($0) }
+        Self.componentQueue.async { [weak self] in
+            var directories: [Bool] = []
+            var dropTargets: [Bool] = []
+            let resolved = requestedPaths.enumerated().map { index, p -> (title: String, image: NSImage) in
+                var isDirectory: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: p, isDirectory: &isDirectory)
+                directories.append(exists && isDirectory.boolValue)
+                dropTargets.append(exists && isDirectory.boolValue && !NSWorkspace.shared.isFilePackage(atPath: p))
+                if index == requestedPaths.count - 1, index > 0, let selectedIcon {
+                    return (FileManager.default.displayName(atPath: p), selectedIcon)
+                }
+                return Self.component(for: p, rootTitle: index == 0 ? rootTitle : nil)
             }
-            return Self.component(for: p, isRoot: index == 0)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.shownPath == path else { return }
+                self.componentPaths = requestedPaths
+                self.componentDirectories = directories
+                self.componentDropTargets = dropTargets
+                self.components = resolved
+                self.componentTitleWidths = resolved.map {
+                    4 + ceil(($0.title as NSString).size(withAttributes: [.font: self.pathFont]).width)
+                }
+                self.shownTitles = []
+                self.scheduleFit()
+            }
         }
-        shownTitles = []
-        fitStatus()
     }
 
     /// The path's components, and which of them show their name. The bar
@@ -190,9 +212,9 @@ final class BottomBarView: NSView {
 
     private func pathWidth(_ titles: [Bool]) -> CGFloat {
         var width: CGFloat = 0
-        for (i, c) in components.enumerated() {
+        for i in components.indices {
             width += 16   // icon
-            if titles[i] { width += 4 + ceil((c.title as NSString).size(withAttributes: [.font: pathFont]).width) }
+            if titles[i] { width += componentTitleWidths[i] }
             if i < components.count - 1 { width += 15 }   // chevron and spacing
         }
         return width
@@ -219,11 +241,10 @@ final class BottomBarView: NSView {
         for cell in (pathControl.cell as? NSPathCell)?.pathComponentCells ?? [] { cell.font = pathControl.font }
     }
 
-    private static func component(for path: String, isRoot: Bool) -> (title: String, image: NSImage) {
+    private static func component(for path: String, rootTitle: String?) -> (title: String, image: NSImage) {
         if let hit = componentCache[path] { return hit }
         if componentCache.count > 256 { componentCache.removeAll() }
-        let title = isRoot ? (VolumeMonitor.shared.volume(containing: path)?.name ?? FileManager.default.displayName(atPath: path))
-                           : FileManager.default.displayName(atPath: path)
+        let title = rootTitle ?? FileManager.default.displayName(atPath: path)
         let entry = (title: title, image: sized(NSWorkspace.shared.icon(forFile: path)))
         componentCache[path] = entry
         return entry
@@ -240,7 +261,8 @@ final class BottomBarView: NSView {
     func setStatus(_ variants: [String]) {
         guard variants != statusVariants else { return }
         statusVariants = variants
-        fitStatus()
+        statusWidths.removeAll(keepingCapacity: true)
+        scheduleFit()
     }
 
     func syncIconSize(_ size: CGFloat) {
@@ -253,7 +275,12 @@ final class BottomBarView: NSView {
         let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
         // After this layout pass: the fit can replace the path's items.
-        guard widthChanged, !fitScheduled else { return }
+        guard widthChanged else { return }
+        scheduleFit()
+    }
+
+    private func scheduleFit() {
+        guard !fitScheduled else { return }
         fitScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -267,7 +294,12 @@ final class BottomBarView: NSView {
         let available = bounds.width - 7 - 12 - 12 - sliderRoom
         let full = components.isEmpty ? 0 : pathWidth([Bool](repeating: true, count: components.count))
         let font = status.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
-        func width(_ text: String) -> CGFloat { ceil((text as NSString).size(withAttributes: [.font: font]).width) + 4 }
+        func width(_ text: String) -> CGFloat {
+            if let cached = statusWidths[text] { return cached }
+            let measured = ceil((text as NSString).size(withAttributes: [.font: font]).width) + 4
+            statusWidths[text] = measured
+            return measured
+        }
         let chosen = statusVariants.first { width($0) <= available - full } ?? statusVariants.last ?? ""
         if status.stringValue != chosen { status.stringValue = chosen }
         fitPath(room: available - (chosen.isEmpty ? 0 : width(chosen)))
@@ -278,8 +310,7 @@ final class BottomBarView: NSView {
               let i = cell.pathComponentCells.firstIndex(where: { $0 === clicked }), i < componentPaths.count
         else { return }
         let url = URL(fileURLWithPath: componentPaths[i])
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+        if i < componentDirectories.count, componentDirectories[i] {
             onNavigate?(url)
         } else {
             onNavigate?(url.deletingLastPathComponent())

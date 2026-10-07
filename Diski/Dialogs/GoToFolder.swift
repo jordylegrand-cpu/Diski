@@ -12,7 +12,16 @@ final class GoToFolderModel {
     /// The folder last listed and its subfolders' names (hidden ones too),
     /// sorted: typing more of a name only filters them.
     private var cachedParent: String?
-    private var cachedNames: [String] = []
+    private var cachedNames: [(name: String, lower: [UInt8])] = []
+    private var listings: [String: [(name: String, lower: [UInt8])]] = [:]
+    private var listingWork: DispatchWorkItem?
+    private var generation = 0
+    private var recentPaths: [String] = []
+    private var recentBytes: [[UInt8]] = []
+    private var recentLowercase: [String] = []
+    private static let listingQueue = DispatchQueue(label: "app.diski.folder-completion", qos: .userInitiated)
+
+    deinit { listingWork?.cancel() }
 
     init(start: String) {
         let home = NSHomeDirectory()
@@ -29,6 +38,9 @@ final class GoToFolderModel {
     }
 
     func recompute() {
+        generation += 1
+        listingWork?.cancel()
+        let request = generation
         let raw = text.trimmingCharacters(in: .whitespaces)
         var results: [String] = []
         if raw.hasPrefix("/") || raw.hasPrefix("~") {
@@ -45,25 +57,56 @@ final class GoToFolderModel {
             // The folder is read and sorted once, not on every keystroke.
             let directory = parent.isEmpty ? "/" : parent
             if directory != cachedParent {
-                var all: [String] = []
-                // Only folders and links can be navigable: everything else is skipped before it becomes an item.
-                try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true,
-                                                  include: { _, type in type == DirectoryReader.vDIR || type == DirectoryReader.vLNK }) { item in
-                    guard item.isNavigable else { return }
-                    all.append(item.name)
-                }
-                all.sort { $0.localizedStandardCompare($1) == .orderedAscending }
-                cachedNames = all
                 cachedParent = directory
+                cachedNames = listings[directory] ?? []
+                if listings[directory] == nil {
+                    let work = DispatchWorkItem { [weak self] in
+                        var all: [String] = []
+                        try? DirectoryReader.forEachEntry(inDirectory: directory, detailed: true,
+                            include: { _, type in type == DirectoryReader.vDIR || type == DirectoryReader.vLNK }) { item in
+                            if item.isNavigable { all.append(item.name) }
+                        }
+                        all.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+                        let names = all.map { (name: $0, lower: Array($0.lowercased().utf8)) }
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            self.listings[directory] = names
+                            guard request == self.generation else { return }
+                            self.cachedNames = names
+                            self.recompute()
+                        }
+                    }
+                    listingWork = work
+                    Self.listingQueue.asyncAfter(deadline: .now() + 0.08, execute: work)
+                }
+            } else if let names = listings[directory] {
+                cachedNames = names
+            } else {
+                // A cancelled request for this directory must be rescheduled.
+                cachedParent = nil
+                recompute()
+                return
             }
-            let names = cachedNames.filter {
-                (!$0.hasPrefix(".") || prefix.hasPrefix(".")) && (prefix.isEmpty || $0.lowercased().hasPrefix(prefix))
+            let needle = Array(prefix.utf8)
+            let names = cachedNames.lazy.filter {
+                (!$0.name.hasPrefix(".") || prefix.hasPrefix(".")) && $0.lower.starts(with: needle)
             }
             let base = parent == "/" ? "" : parent
-            results = names.prefix(12).map { base + "/" + $0 }
+            results = names.prefix(12).map { base + "/" + $0.name }
         } else if !raw.isEmpty {
-            let needle = raw.lowercased()
-            results = Prefs.recentFolders.filter { fuzzyMatch(needle, $0.lowercased()) }.prefix(12).map { $0 }
+            let paths = Prefs.recentFolders
+            if paths != recentPaths {
+                recentPaths = paths
+                recentLowercase = paths.map { $0.lowercased() }
+                recentBytes = recentLowercase.map { Array($0.utf8) }
+            }
+            let lowercase = raw.lowercased()
+            let needle = Array(lowercase.utf8)
+            let ascii = needle.allSatisfy { $0 < 128 }
+            results = recentPaths.indices.lazy.filter {
+                ascii ? self.fuzzyMatch(needle, self.recentBytes[$0])
+                    : self.fuzzyMatchCharacters(lowercase, self.recentLowercase[$0])
+            }.prefix(12).map { recentPaths[$0] }
         } else {
             results = Array(Prefs.recentFolders.prefix(12))
         }
@@ -73,10 +116,20 @@ final class GoToFolderModel {
     }
 
     /// Characters of `needle` appear in order in `haystack`.
-    private func fuzzyMatch(_ needle: String, _ haystack: String) -> Bool {
+    private func fuzzyMatch(_ needle: [UInt8], _ haystack: [UInt8]) -> Bool {
+        var index = 0
+        for byte in needle {
+            while index < haystack.count && haystack[index] != byte { index += 1 }
+            guard index < haystack.count else { return false }
+            index += 1
+        }
+        return true
+    }
+
+    private func fuzzyMatchCharacters(_ needle: String, _ haystack: String) -> Bool {
         var index = haystack.startIndex
-        for char in needle {
-            guard let found = haystack[index...].firstIndex(of: char) else { return false }
+        for character in needle {
+            guard let found = haystack[index...].firstIndex(of: character) else { return false }
             index = haystack.index(after: found)
         }
         return true

@@ -15,7 +15,7 @@ final class DirectoryWatcher {
     /// Written on the main thread, read on the event queue.
     private var watched: Set<String> = []
     private let lock = NSLock()
-    private let queue = DispatchQueue(label: "app.diski.fsevents", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "app.diski.fsevents", qos: .utility)
 
     deinit {
         if let stream { DirectoryWatcher.release(stream) }
@@ -81,6 +81,11 @@ final class DirectoryWatcher {
         FSEventStreamRelease(stream)
     }
 
+    private static func parent(of path: String) -> String {
+        guard let slash = path.lastIndex(of: "/") else { return "" }
+        return slash == path.startIndex ? "/" : String(path[..<slash])
+    }
+
     /// Runs on the event queue: reduces a batch of item events to the folders
     /// involved, so the main thread sees each folder once.
     private func handle(_ events: [(path: String, isFile: Bool)]) {
@@ -91,11 +96,11 @@ final class DirectoryWatcher {
         var changedFolders = Set<String>()
         for event in events {
             var path = event.path
-            if path.utf8.count > 1 && path.utf8.last == UInt8(ascii: "/") { path.removeLast() }
+            if path != "/" && path.utf8.last == UInt8(ascii: "/") { path.removeLast() }
             // Folders that changed themselves (created, renamed, attributes),
             // and watched items. Events without item flags count as folders.
             if !event.isFile || watched.contains(path) { changedFolders.insert(path) }
-            let parent = (path as NSString).deletingLastPathComponent
+            let parent = Self.parent(of: path)
             if !parent.isEmpty { parents.insert(parent) }
         }
         var hit = Set<String>()
@@ -107,7 +112,7 @@ final class DirectoryWatcher {
             if watched.contains(parent) {
                 hit.insert(parent)
             } else {
-                let grandparent = (parent as NSString).deletingLastPathComponent
+                let grandparent = Self.parent(of: parent)
                 if watched.contains(grandparent) { hit.insert(grandparent) }
             }
         }

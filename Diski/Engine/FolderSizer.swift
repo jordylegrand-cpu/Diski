@@ -1,10 +1,23 @@
-import Foundation
+import AppKit
 
 /// Computes recursive folder sizes in the background with a small pool of
-/// workers sharing one directory stack. Results are cached and invalidated by
+/// single-threaded walks. Results are cached and invalidated by
 /// file-system events.
 final class FolderSizer {
     static let shared = FolderSizer()
+
+    /// The last size of each folder from earlier walks and launches: shown and
+    /// sorted by right away while a fresh walk runs, so a list sorted by size
+    /// opens in (nearly) its final order instead of reshuffling.
+    private var remembered: [String: Int64] = [:]
+    private var rememberedLoaded = false
+    private var rememberedSaveScheduled = false
+    private let maxRemembered = 20_000
+    private lazy var rememberedURL: URL = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("Diski/FolderSizes.plist")
+    }()
 
     struct Result {
         let bytes: Int64
@@ -22,7 +35,7 @@ final class FolderSizer {
     /// Walks not started yet, newest last (started first: the rows on screen
     /// now matter more than the ones scrolled past).
     private var pending: [(path: String, walk: Walk)] = []
-    /// Two walks at a time; each walk is itself parallel.
+    /// Four single-threaded walks at a time, with no nested worker pool.
     private var running = 0
     private let workQueue = DispatchQueue(label: "app.diski.foldersize", qos: .utility, attributes: .concurrent)
     /// Folders whose next walk waits a little because they keep changing.
@@ -30,6 +43,62 @@ final class FolderSizer {
     /// When the last walk of a slow folder ended and how long it took.
     private var lastWalks: [String: (end: Date, duration: TimeInterval)] = [:]
     private let maxAge: TimeInterval = 180
+
+    private init() {
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.saveRemembered(now: true, synchronously: true)
+        }
+    }
+
+    /// Folders walked since launch; any other size shown is a remembered one.
+    private var walked = Set<String>()
+
+    /// Whether `path` has not been walked since launch, so a size it shows is
+    /// only remembered from before and still needs a walk.
+    func needsFirstWalk(_ path: String) -> Bool { !walked.contains(path) }
+
+    /// A folder's size from an earlier walk (possibly out of date), if any.
+    func rememberedSize(_ path: String) -> Int64? {
+        loadRemembered()
+        return remembered[path]
+    }
+
+    private func loadRemembered() {
+        guard !rememberedLoaded else { return }
+        rememberedLoaded = true
+        guard let data = try? Data(contentsOf: rememberedURL),
+              let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: NSNumber] else { return }
+        remembered = stored.mapValues { $0.int64Value }
+    }
+
+    private func remember(_ path: String, bytes: Int64) {
+        loadRemembered()
+        guard remembered[path] != bytes else { return }
+        if remembered.count >= maxRemembered { remembered.removeAll(keepingCapacity: true) }
+        remembered[path] = bytes
+        saveRemembered(now: false)
+    }
+
+    private func saveRemembered(now: Bool, synchronously: Bool = false) {
+        guard rememberedLoaded else { return }
+        if !now {
+            guard !rememberedSaveScheduled else { return }
+            rememberedSaveScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.saveRemembered(now: true) }
+            return
+        }
+        rememberedSaveScheduled = false
+        let snapshot = remembered, url = rememberedURL
+        let write = {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let data = try? PropertyListSerialization.data(fromPropertyList: snapshot, format: .binary, options: 0) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+        // At quit the write must finish before the process exits.
+        if synchronously { write() } else { DispatchQueue.global(qos: .utility).async(execute: write) }
+    }
 
     func cached(_ path: String) -> Result? {
         guard let result = cache[path] else { return nil }
@@ -94,7 +163,7 @@ final class FolderSizer {
     }
 
     private func startPendingWalks() {
-        while running < 2, let next = pending.popLast() {
+        while running < 4, let next = pending.popLast() {
             // Cancelled or replaced walks are simply dropped here.
             guard jobs[next.path] === next.walk, !next.walk.isCancelled else { continue }
             running += 1
@@ -129,6 +198,8 @@ final class FolderSizer {
         let result = Result(bytes: bytes, items: items, computedAt: Date())
         // A walk that raced with changes is still worth showing, but not caching.
         if !walk.isStale { cache[path] = result }
+        walked.insert(path)
+        remember(path, bytes: bytes)
         for callback in waiting.removeValue(forKey: path) ?? [] { callback(result) }
         if let again = rerunWaiters.removeValue(forKey: path), !again.isEmpty {
             waiting[path, default: []].append(contentsOf: again)
@@ -177,14 +248,13 @@ final class FolderSizer {
         }
     }
 
-    // MARK: - Parallel walk
+    // MARK: - Walk
 
     final class Walk {
         /// Set on the main thread when the folder changes while the walk runs.
         var isStale = false
-        private let condition = NSCondition()
+        private let condition = NSLock()
         private var stack: [String]
-        private var active = 0
         private var bytes: Int64 = 0
         private var items = 0
         private var cancelled = false
@@ -203,60 +273,60 @@ final class FolderSizer {
         func cancel() {
             condition.lock()
             cancelled = true
-            condition.broadcast()
             condition.unlock()
         }
 
         func run() -> (Int64, Int) {
-            let workers = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount))
-            DispatchQueue.concurrentPerform(iterations: workers) { _ in work() }
+            guard let root = stack.first else { return (0, 0) }
+            var ancestor = DirectoryReader.normalized(root)
+            var ancestors = [ancestor]
+            while ancestor != "/" {
+                ancestor = (ancestor as NSString).deletingLastPathComponent
+                ancestors.append(ancestor)
+            }
+            for path in ancestors.reversed() {
+                guard !isCancelled, !DirectoryReader.isDataless(path) else { return (0, 0) }
+            }
+            work()
             return (bytes, items)
         }
 
         private func work() {
-            // One read buffer per worker thread, made at its first folder and reused for the rest.
             var buffer: DirectoryReader.Buffer?
-            while true {
-                condition.lock()
-                while stack.isEmpty && active > 0 && !cancelled {
-                    condition.wait()
-                }
-                if cancelled || (stack.isEmpty && active == 0) {
-                    condition.broadcast()
-                    condition.unlock()
-                    return
-                }
-                let directory = stack.removeLast()
-                active += 1
-                condition.unlock()
-
+            // Dataless subfolders are skipped from their entry's flags; run() checked the root.
+            while !isCancelled, let directory = stack.popLast() {
                 var subdirectories: [String] = []
                 var localBytes: Int64 = 0
                 var localItems = 0
                 let prefix = directory == "/" ? "/" : directory + "/"
                 let reader = buffer ?? DirectoryReader.Buffer()
                 buffer = reader
-                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader) { entry in
+                var entriesUntilCancellationCheck = 0
+                var continuing = true
+                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader, shouldContinue: {
+                    if entriesUntilCancellationCheck == 0 {
+                        continuing = !self.isCancelled
+                        entriesUntilCancellationCheck = 256
+                    }
+                    entriesUntilCancellationCheck -= 1
+                    return continuing
+                }) { entry in
                     localItems += 1
                     if entry.isDirectory {
-                        if !entry.isMountPoint { subdirectories.append(prefix + entry.nameString) }
+                        if !entry.isMountPoint && !entry.isDataless { subdirectories.append(prefix + entry.nameString) }
                     } else if entry.size > 0 {
                         localBytes += entry.size
                     }
                 }
 
-                condition.lock()
                 stack.append(contentsOf: subdirectories)
                 bytes += localBytes
                 items += localItems
-                active -= 1
                 var report: Int64? = nil
                 if onProgress != nil, Date().timeIntervalSince(lastReport) > 0.25 {
                     lastReport = Date()
                     report = bytes
                 }
-                condition.broadcast()
-                condition.unlock()
                 if let report { onProgress?(report) }
             }
         }

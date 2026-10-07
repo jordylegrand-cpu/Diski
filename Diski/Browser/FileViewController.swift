@@ -33,6 +33,8 @@ class FileViewController: NSViewController {
     var targetDirectory: String { directoryPath }
     /// Screen rect of an item's icon, for Quick Look zoom animations.
     func iconScreenRect(for item: FileItem) -> NSRect? { nil }
+    /// The image the item's cell shows right now (icon or thumbnail), for Quick Look's zoom.
+    func iconImage(for item: FileItem) -> NSImage? { nil }
     /// Called before the view mode is replaced.
     func willDeactivate() {}
 
@@ -54,13 +56,15 @@ final class ItemImageLoader {
     /// in flight instead of restarting it and flashing back to the type icon.
     private var loadedKey: (modified: Double, size: Int64, points: CGFloat, thumbnails: Bool, iconMode: Bool)?
     private var showsThumbnail = false
+    private var generation = 0
+    private static let iconQueue = DispatchQueue(label: "app.diski.cell-type-icons", qos: .userInitiated)
 
     /// `iconMode`: Quick Look's decorated thumbnail (rounded, inset, shadowed), as
     /// Finder shows files in its list, column and icon views; big previews stay plain.
     func load(_ item: FileItem, into imageView: NSImageView, points: CGFloat, thumbnails: Bool, iconMode: Bool = false) {
         if item === self.item, imageView === self.imageView, let k = loadedKey,
            k.modified == item.modified, k.size == item.size, k.points == points, k.thumbnails == thumbnails,
-           k.iconMode == iconMode, thumbnailToken != nil || showsThumbnail { return }
+           k.iconMode == iconMode { return }
         cancel()
         self.item = item
         self.imageView = imageView
@@ -71,14 +75,28 @@ final class ItemImageLoader {
             showsThumbnail = true
             return
         }
+        let requestGeneration = generation
         if let icon = IconCache.shared.cachedItemIcon(path: item.path) {
             imageView.image = icon
         } else {
-            imageView.image = IconCache.shared.immediateIcon(for: item)
+            // A type seen before draws at once; only a new type's icon is fetched off the main thread.
+            if let icon = IconCache.shared.cachedTypeIcon(for: item) {
+                imageView.image = icon
+            } else {
+                imageView.image = nil
+                Self.iconQueue.async {
+                    let icon = IconCache.shared.icon(for: FileKinds.type(for: item))
+                    DispatchQueue.main.async { [weak self, weak imageView] in
+                        guard let self, self.generation == requestGeneration, !self.showsThumbnail,
+                              imageView?.image == nil else { return }
+                        imageView?.image = icon
+                    }
+                }
+            }
             if IconCache.shared.needsItemIcon(item) {
                 IconCache.shared.loadItemIcon(for: item) { [weak self, weak imageView] icon in
                     // A thumbnail that arrived first wins over the item's icon.
-                    guard let self, self.item === item, !self.showsThumbnail else { return }
+                    guard let self, self.item === item, self.generation == requestGeneration, !self.showsThumbnail else { return }
                     imageView?.image = icon
                 }
             }
@@ -88,7 +106,7 @@ final class ItemImageLoader {
             let scale = imageView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
             thumbnailToken = ThumbnailCache.shared.request(for: item, points: points, scale: scale,
                                                            iconMode: iconMode) { [weak self, weak imageView] image in
-                guard let self, self.item === item else { return }
+                guard let self, self.item === item, self.generation == requestGeneration else { return }
                 self.thumbnailToken = nil
                 guard let image else { return }
                 self.showsThumbnail = true
@@ -98,6 +116,7 @@ final class ItemImageLoader {
     }
 
     func cancel() {
+        generation += 1
         if let token = thumbnailToken {
             ThumbnailCache.shared.cancel(token)
             thumbnailToken = nil

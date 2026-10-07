@@ -196,14 +196,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        // Below the toolbar, like Finder's sidebar (no scroll edge line).
+        // Full height: the sidebar scrolls under the titlebar with the native edge effect.
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 177, height: 600))
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         view = container
@@ -223,6 +223,37 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     // MARK: Model
 
     private var lastFavorites: [String] = []
+    private var favoriteNames: [String: String] = [:]
+    private var resolvedFavorites = Set<String>()
+    private var iCloudExists: Bool?
+    private var lookupGeneration = 0
+
+    private func refreshPathMetadata(favorites: [String], iCloud: String) {
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let fm = FileManager.default
+            var names: [String: String] = [:]
+            for path in favorites where fm.fileExists(atPath: path) {
+                names[path] = fm.displayName(atPath: path)
+            }
+            let exists = fm.fileExists(atPath: iCloud)
+            DispatchQueue.main.async {
+                guard let self, self.lookupGeneration == generation else { return }
+                guard self.favoriteNames != names || self.resolvedFavorites != Set(favorites)
+                    || self.iCloudExists != exists else { return }
+                self.favoriteNames = names
+                self.resolvedFavorites = Set(favorites)
+                self.iCloudExists = exists
+                let collapsed = Set(self.sections.filter { !self.outlineView.isItemExpanded($0) }.map { $0.id })
+                self.rebuild(resolvePaths: false)
+                for section in self.sections where !collapsed.contains(section.id) {
+                    self.outlineView.expandItem(section)
+                }
+                self.highlight(path: self.highlightedPath)
+            }
+        }
+    }
 
     @objc private func sourcesChanged(_ notification: Notification) {
         // Of the preferences, only the favorites change the sidebar.
@@ -246,9 +277,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         VolumeMonitor.shared.volumes == lastVolumes
     }
 
-    private func rebuild() {
+    private func rebuild(resolvePaths: Bool = true) {
+        let wasHighlighting = isHighlighting
+        isHighlighting = true
+        defer { isHighlighting = wasHighlighting }
         let home = NSHomeDirectory()
-        let fm = FileManager.default
         lastFavorites = Prefs.favorites
         lastVolumes = VolumeMonitor.shared.volumes
 
@@ -257,14 +290,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                                    image: SidebarIcons.image(symbol: "clock"))]
 
         let favorites = SidebarSection(id: "favorites", title: "Favorites")
-        for path in lastFavorites where fm.fileExists(atPath: path) {
-            favorites.entries.append(SidebarEntry(kind: .favorite, title: fm.displayName(atPath: path), path: path,
+        for path in lastFavorites where !resolvedFavorites.contains(path) || favoriteNames[path] != nil {
+            favorites.entries.append(SidebarEntry(kind: .favorite, title: favoriteNames[path] ?? (path as NSString).lastPathComponent, path: path,
                                                   image: SidebarIcons.image(forFolder: path)))
         }
 
         let locations = SidebarSection(id: "locations", title: "Locations")
         let iCloud = home + "/Library/Mobile Documents/com~apple~CloudDocs"
-        if fm.fileExists(atPath: iCloud) {
+        if iCloudExists != false {
             locations.entries.append(SidebarEntry(kind: .iCloud, title: "iCloud Drive", path: iCloud,
                                                   image: SidebarIcons.image(symbol: "icloud")))
         }
@@ -297,6 +330,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         sections = [favorites, locations, tags]
         outlineView.reloadData()
+        if resolvePaths { refreshPathMetadata(favorites: lastFavorites, iCloud: iCloud) }
     }
 
     // MARK: Highlighting the current location

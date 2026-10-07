@@ -16,11 +16,11 @@ Everything Finder does — and the things it should have done all along — with
   <img src="docs/screenshots/list.jpg" alt="Diski list view" width="900">
 </p>
 
-> **Alpha (0.1.3).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
+> **Alpha (0.1.4).** Diski is young: it is fast and already does a lot, but expect rough edges. Please [report issues](https://github.com/jordylegrand-cpu/Diski/issues).
 
 ## Install
 
-1. Download **Diski-v0.1.3-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
+1. Download **Diski-v0.1.4-alpha.zip** from the [latest release](https://github.com/jordylegrand-cpu/Diski/releases/latest), unzip it and move **Diski.app** to Applications.
 2. Open Diski. It is signed with Developer ID and notarized by Apple, so it opens like any other app.
 3. For the Trash and other protected folders, turn on **Full Disk Access** for Diski in System Settings › Privacy & Security.
 

@@ -21,12 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launched = true
         guard !isRunningTests else { return }
-        if !CIDriver.isEnabled { Updater.shared.start() }
         FileOperationManager.shared.conflictPresenter = { source, existing, operation, completion in
             ConflictDialog.present(source: source, existing: existing, operation: operation, completion: completion)
         }
-        // Opens Finder's "Copy" window by itself for operations that take a while.
-        _ = ProgressWindowController.shared
         NSApp.servicesProvider = self
         _ = VolumeMonitor.shared
         dayObserver = NotificationCenter.default.addObserver(forName: .NSCalendarDayChanged, object: nil, queue: .main) { _ in
@@ -42,7 +39,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let controller = makeWindow(path: FileManager.default.fileExists(atPath: start) ? start : NSHomeDirectory())
             controller.showWindow(nil)
         }
-        CIDriver.run(app: self)
+        DispatchQueue.main.async {
+            if !CIDriver.isEnabled { Updater.shared.start() }
+            _ = ProgressWindowController.shared
+            CIDriver.run(app: self)
+        }
         NSApp.activate()
         // Registers the Services entries without holding up the first window (an IPC to pbs).
         DispatchQueue.main.async { NSUpdateDynamicServices() }

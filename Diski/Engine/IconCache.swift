@@ -22,6 +22,9 @@ final class IconCache {
 
     private init() {
         itemIcons.countLimit = 4000
+        itemIcons.totalCostLimit = 64 * 1024 * 1024
+        typeIcons.countLimit = 512
+        typeIcons.totalCostLimit = 32 * 1024 * 1024
     }
 
     lazy var genericFolder: NSImage = NSWorkspace.shared.icon(for: .folder)
@@ -37,8 +40,14 @@ final class IconCache {
         let key = type.identifier as NSString
         if let icon = typeIcons.object(forKey: key) { return icon }
         let icon = NSWorkspace.shared.icon(for: type)
-        typeIcons.setObject(icon, forKey: key)
+        typeIcons.setObject(icon, forKey: key, cost: Self.cost(of: icon))
         return icon
+    }
+
+    /// The type icon when it is already cached (folders always are), without asking NSWorkspace.
+    func cachedTypeIcon(for item: FileItem) -> NSImage? {
+        if item.type == .directory && !item.isMountPoint { return genericFolder }
+        return typeIcons.object(forKey: FileKinds.type(for: item).identifier as NSString)
     }
 
     func cachedItemIcon(path: String) -> NSImage? {
@@ -85,10 +94,16 @@ final class IconCache {
             let icon = NSWorkspace.shared.icon(forFile: path)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.itemIcons.setObject(icon, forKey: path as NSString)
+                self.itemIcons.setObject(icon, forKey: path as NSString, cost: Self.cost(of: icon))
                 let callbacks = self.waiting.removeValue(forKey: path) ?? []
                 for callback in callbacks { callback(icon) }
             }
+        }
+    }
+
+    private static func cost(of image: NSImage) -> Int {
+        image.representations.reduce(0) { cost, representation in
+            cost + max(1, representation.pixelsWide) * max(1, representation.pixelsHigh) * 4
         }
     }
 

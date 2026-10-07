@@ -46,6 +46,8 @@ final class VolumeMonitor {
         .volumeTotalCapacityKey, .volumeAvailableCapacityKey,
     ]
 
+    private static let keySet = Set(keys)
+
     private init() {
         refresh()
         let center = NSWorkspace.shared.notificationCenter
@@ -80,7 +82,7 @@ final class VolumeMonitor {
     }
 
     static func info(for url: URL) -> VolumeInfo? {
-        guard let values = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+        guard let values = try? url.resourceValues(forKeys: keySet) else { return nil }
         if values.volumeIsBrowsable == false { return nil }
         let isRoot = values.volumeIsRootFileSystem ?? (url.path == "/")
         let name = values.volumeLocalizedName ?? values.volumeName ?? url.lastPathComponent

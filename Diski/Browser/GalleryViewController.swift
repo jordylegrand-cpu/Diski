@@ -38,7 +38,7 @@ final class FilmstripItem: NSCollectionViewItem {
     func configure(_ file: FileItem) {
         self.file = file
         // Finder's filmstrip thumbnails: Quick Look's icon-mode style, as in the icon view.
-        loader.load(file, into: icon, points: 64, thumbnails: true, iconMode: true)
+        loader.load(file, into: icon, points: 46, thumbnails: true, iconMode: true)
         updateSelection()
     }
 
@@ -90,6 +90,7 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
     private let layout = NSCollectionViewFlowLayout()
     private let contextMenu = NSMenu()
     private var previewToken = 0
+    private var prefetcher: CollectionImagePrefetcher?
     /// The file the large preview shows; selecting it again does not reload it.
     private var previewedPath: String?
     private var draggedItems: [FileItem] = []
@@ -176,9 +177,15 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
             stripScroll.heightAnchor.constraint(equalToConstant: 64),
         ])
         view = root
+        prefetcher = CollectionImagePrefetcher(collection: strip, clip: stripScroll.contentView) { [weak self] in
+            (self?.items ?? [], 46)
+        }
     }
 
     override func willDeactivate() {
+        previewToken += 1
+        prefetcher?.cancel()
+        for case let item as FilmstripItem in strip.visibleItems() { item.loader.cancel() }
         previewedPath = nil
         preview?.previewItem = nil
         preview?.close()
@@ -186,6 +193,8 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
 
     override func itemsDidChange(from previous: [FileItem], changes: DirectoryStore.Changes?, reset: Bool) {
         guard isViewLoaded else { return }
+        prefetcher?.cancel()
+        prefetcher?.schedule()
         if reset || changes == nil || changes?.isInitialLoad == true {
             reloadStrip(previous: previous, reset: reset)
             return
@@ -263,6 +272,17 @@ final class GalleryViewController: FileViewController, NSCollectionViewDataSourc
             strip.configure(items[indexPath.item])
         }
         return item
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, willDisplay item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        guard let cell = item as? FilmstripItem, indexPath.item < items.count else { return }
+        cell.configure(items[indexPath.item])
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        (item as? FilmstripItem)?.loader.cancel()
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {

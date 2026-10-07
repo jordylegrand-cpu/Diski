@@ -123,10 +123,15 @@ final class FileItem: Hashable, CustomStringConvertible {
     var isLocked: Bool { (bsdFlags & UInt32(UF_IMMUTABLE)) != 0 }
     var isApplication: Bool { type == .package && ext == "app" }
 
+    private var _applicationDisplayName: String?
+
     /// The name Finder shows: applications without ".app" unless all extensions are shown.
     var displayName: String {
         guard isApplication, !FileItem.showsAllExtensions, name.utf8.count > 4 else { return name }
-        return String(name.dropLast(4))
+        if let cached = _applicationDisplayName { return cached }
+        let text = String(name.dropLast(4))
+        _applicationDisplayName = text
+        return text
     }
 
     /// Legacy Finder label index (0 = none, 1...7) kept in sync with the first colored tag.
@@ -152,6 +157,8 @@ final class FileItem: Hashable, CustomStringConvertible {
         let changed = type != other.type || size != other.size || modified != other.modified
             || finderFlags != other.finderFlags || bsdFlags != other.bsdFlags
             || childCount != other.childCount || created != other.created || fileID != other.fileID
+        if _sortKey == nil { _sortKey = other._sortKey }
+        if _ext == nil { _ext = other._ext }
         type = other.type
         fileID = other.fileID
         size = other.size

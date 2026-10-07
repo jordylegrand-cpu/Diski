@@ -12,11 +12,13 @@ struct ArrangeOptions: Equatable {
 /// (decorate-sort-undecorate) so sorting large folders stays in milliseconds.
 enum ItemArranger {
     static func arrange(_ items: [FileItem], options: ArrangeOptions) -> [FileItem] {
-        var list = options.showHidden ? items : items.filter { !$0.isHidden }
         let needle = options.filter.trimmingCharacters(in: .whitespaces)
-        if !needle.isEmpty {
-            let matcher = NameMatcher(needle)
-            list = list.filter { matcher.matches($0) }
+        let matcher = needle.isEmpty ? nil : NameMatcher(needle)
+        let list: [FileItem]
+        if options.showHidden && matcher == nil {
+            list = items
+        } else {
+            list = items.filter { (options.showHidden || !$0.isHidden) && (matcher?.matches($0) ?? true) }
         }
         return sort(list, options: options)
     }
@@ -62,7 +64,9 @@ enum ItemArranger {
                 guard li >= 0, lj >= 0 else { return NameSortKey.compare(list[i].sortKey, list[j].sortKey) }
                 let r = NameSortKey.compareFolded(UnsafeBufferPointer(rebasing: b[nameStart[i] ..< nameStart[i] + li]),
                                                   UnsafeBufferPointer(rebasing: b[nameStart[j] ..< nameStart[j] + lj]))
-                return r == .orderedSame ? NameSortKey.compare(list[i].sortKey, list[j].sortKey) : r
+                if r != .orderedSame { return r }
+                let a = list[i].name, c = list[j].name
+                return a < c ? .orderedAscending : (a == c ? .orderedSame : .orderedDescending)
             }
             order.sort { i, j in
                 if isFolder[i] != isFolder[j] { return isFolder[i] }

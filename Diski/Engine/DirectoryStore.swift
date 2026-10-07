@@ -33,6 +33,7 @@ final class DirectoryStore {
         fileprivate(set) var error: DirectoryReader.ReadError?
         fileprivate(set) var lastRead = Date.distantPast
         fileprivate var reloadQueued = false
+        fileprivate var reloadQoS: DispatchQoS.QoSClass = .utility
         fileprivate var completions: [(Listing) -> Void] = []
         fileprivate var lastUsed = Date()
         /// Nobody watched the folder for a while: changes may have been missed.
@@ -54,6 +55,7 @@ final class DirectoryStore {
     private let watcher = DirectoryWatcher()
     private var watcherNeedsUpdate = false
     private let readQueue = DispatchQueue(label: "app.diski.read", qos: .userInitiated, attributes: .concurrent)
+    private let refreshQueue = DispatchQueue(label: "app.diski.refresh", qos: .utility, attributes: .concurrent)
     private let maxCachedListings = 96
 
     private init() {
@@ -72,7 +74,7 @@ final class DirectoryStore {
         guard !watchCounts.isEmpty else { return }
         var folders = Set<String>()
         for raw in rawPaths {
-            var child = raw.utf8.count > 1 && raw.utf8.last == UInt8(ascii: "/") ? String(raw.dropLast()) : raw
+            var child = raw != "/" && raw.utf8.last == UInt8(ascii: "/") ? String(raw.dropLast()) : raw
             var depth = 0
             while let slash = child.lastIndex(of: "/") {
                 let parent = slash == child.startIndex ? "/" : String(child[..<slash])
@@ -215,13 +217,13 @@ final class DirectoryStore {
             guard let listing = listings[path], listing.isLoaded || listing.isLoading, !listing.refreshScheduled else { continue }
             let wait = listing.lastRead.addingTimeInterval(min(1, listing.lastUpdateCost * 8)).timeIntervalSinceNow
             guard wait > 0.01 else {
-                read(listing)
+                read(listing, qos: .utility)
                 continue
             }
             listing.refreshScheduled = true
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
                 listing.refreshScheduled = false
-                self?.read(listing)
+                self?.read(listing, qos: .utility)
             }
         }
     }
@@ -239,8 +241,9 @@ final class DirectoryStore {
     /// Reads `listing` in the background. With a `timeout`, the main thread
     /// waits that long for the result and applies it at once when it arrives in
     /// time; otherwise it is applied on a later turn.
-    private func read(_ listing: Listing, waitingUpTo timeout: TimeInterval = 0) {
+    private func read(_ listing: Listing, waitingUpTo timeout: TimeInterval = 0, qos: DispatchQoS.QoSClass = .userInitiated) {
         if listing.isLoading {
+            if !listing.reloadQueued || qos == .userInitiated { listing.reloadQoS = qos }
             listing.reloadQueued = true
             return
         }
@@ -248,15 +251,13 @@ final class DirectoryStore {
         listing.isLoading = true
         listing.watchLapsed = false
         let path = listing.path
-        // Only a first read keeps its new items; a refresh merges into the existing ones.
-        let initial = !listing.isLoaded
         let pending = PendingRead()
         let arrived = timeout > 0 ? DispatchSemaphore(value: 0) : nil
-        let queue = timeout > 0 ? DispatchQueue.global(qos: .userInteractive) : readQueue
+        let queue = qos == .utility ? refreshQueue : readQueue
         queue.async { [weak self] in
             do {
                 pending.items = try DirectoryReader.read(path: path)
-                if initial { DirectoryStore.prepare(pending.items) }
+                DirectoryStore.prepare(pending.items)
             } catch let error as DirectoryReader.ReadError {
                 pending.error = error
             } catch {
@@ -277,22 +278,21 @@ final class DirectoryStore {
         apply(items: pending.items, error: pending.error, to: listing)
         if listing.reloadQueued {
             listing.reloadQueued = false
-            read(listing)
+            read(listing, qos: listing.reloadQoS)
         }
     }
 
     /// Work the views would otherwise do on the main thread the first time
-    /// they show these items: sort keys, and the kind and thumbnail checks once
-    /// per extension. Runs on the read thread, before the items are shared.
+    /// they show fresh items: sort keys, and the kind and thumbnail checks once
+    /// per file key. Runs on the read thread, before the items are shared.
     private static func prepare(_ items: [FileItem]) {
         var seen = Set<String>()
         for item in items {
             _ = item.sortKey
             guard item.type == .file || item.type == .package else { continue }
-            let ext = item.ext
-            if seen.insert(item.type == .package ? "/" + ext : ext).inserted {
-                _ = FileKinds.kind(for: item)
-                if item.type == .file { _ = FileKinds.wantsThumbnail(item) }
+            let key = FileKinds.preparationKey(for: item)
+            if seen.insert(key).inserted {
+                FileKinds.prepare(for: item)
             }
         }
     }

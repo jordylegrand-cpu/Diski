@@ -67,9 +67,11 @@ final class Updater {
                 }
                 let bundleURL = Bundle.main.bundleURL
                 let path = bundleURL.path
-                let installable = !path.contains("/AppTranslocation/") && !path.contains("/DerivedData/")
-                    && !path.contains("/Build/Products/")
-                    && FileManager.default.isWritableFile(atPath: bundleURL.deletingLastPathComponent().path)
+                let installable = await Task.detached(priority: .utility) {
+                    !path.contains("/AppTranslocation/") && !path.contains("/DerivedData/")
+                        && !path.contains("/Build/Products/")
+                        && FileManager.default.isWritableFile(atPath: bundleURL.deletingLastPathComponent().path)
+                }.value
                 guard installable else {
                     if !userInitiated && announcedVersions.contains(version) { return }
                     announcedVersions.insert(version)
@@ -81,27 +83,33 @@ final class Updater {
                     if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(release.html_url) }
                     return
                 }
-                let directory = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
-                                                            appropriateFor: bundleURL, create: true)
+                let directory = try await Task.detached(priority: .utility) {
+                    try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                                appropriateFor: bundleURL, create: true)
+                }.value
                 pendingDirectory = directory
                 let (download, downloadResponse) = try await URLSession.shared.download(from: asset.browser_download_url)
                 try Self.requireSuccess(downloadResponse)
                 let archive = directory.appendingPathComponent("Diski.zip")
-                try FileManager.default.moveItem(at: download, to: archive)
                 let identifier = Bundle.main.bundleIdentifier
-                let team = Self.teamIdentifier(of: bundleURL)
                 let app = try await Task.detached(priority: .userInitiated) {
-                    try Self.prepareApp(archive: archive, directory: directory, checksum: checksum,
-                                        identifier: identifier, team: team, version: version)
+                    try FileManager.default.moveItem(at: download, to: archive)
+                    let team = Self.teamIdentifier(of: bundleURL)
+                    return try Self.prepareApp(archive: archive, directory: directory, checksum: checksum,
+                                               identifier: identifier, team: team, version: version)
                 }.value
-                if let previous = stagingDirectory { try? FileManager.default.removeItem(at: previous) }
+                if let previous = stagingDirectory {
+                    await Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: previous) }.value
+                }
                 stagingDirectory = directory
                 stagedApp = app
                 stagedVersion = version
                 pendingDirectory = nil
                 offerStagedInstall()
             } catch {
-                if let pendingDirectory { try? FileManager.default.removeItem(at: pendingDirectory) }
+                if let pendingDirectory {
+                    await Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: pendingDirectory) }.value
+                }
                 if userInitiated { showAlert("Couldn't check for updates", error.localizedDescription) }
             }
         }

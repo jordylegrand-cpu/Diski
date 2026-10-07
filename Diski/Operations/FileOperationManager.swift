@@ -35,7 +35,8 @@ final class FileOperationManager: NSObject, ConflictResolving {
 
     @discardableResult
     func move(_ urls: [URL], to destination: URL) -> FileOperation? {
-        let urls = urls.filter { $0.deletingLastPathComponent().standardizedFileURL != destination.standardizedFileURL }
+        let target = destination.standardizedFileURL
+        let urls = urls.filter { $0.deletingLastPathComponent().standardizedFileURL != target }
         guard !urls.isEmpty else { return nil }
         return runCopyEngine(kind: .move, mode: .move, urls: urls, destination: destination)
     }
@@ -596,6 +597,7 @@ final class TrashLedger {
 
     private var entries: [String: String] = [:] // trashed path -> original path
     private let fileURL: URL
+    private let saveQueue = DispatchQueue(label: "app.diski.trashledger", qos: .utility)
 
     private init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -606,6 +608,10 @@ final class TrashLedger {
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             entries = decoded
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                              object: nil, queue: .main) { [weak self] _ in
+            self?.saveQueue.sync {}
         }
     }
 
@@ -633,8 +639,12 @@ final class TrashLedger {
     private func save() {
         // Drop entries whose item is no longer in the Trash.
         entries = entries.filter { FileManager.default.fileExists(atPath: $0.key) }
-        if let data = try? JSONEncoder().encode(entries) {
-            try? data.write(to: fileURL, options: .atomic)
+        let snapshot = entries
+        let destination = fileURL
+        saveQueue.async {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                try? data.write(to: destination, options: .atomic)
+            }
         }
     }
 }

@@ -74,6 +74,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     /// What was asked for while the pane couldn't be seen; shown once it can.
     private var pending: (items: [FileItem], folderPath: String?)?
     private var metadataWork: DispatchWorkItem?
+    private var selectionWork: DispatchWorkItem?
     /// The folder whose size is shown; recalculated when its contents change.
     private var sizedFolder: (item: FileItem, kind: String)?
     private var sizeRefreshScheduled = false
@@ -268,6 +269,8 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
     }
 
     deinit {
+        selectionWork?.cancel()
+        metadataWork?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -428,6 +431,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             imageLoader.cancel()
             compactLoader.cancel()
             metadataWork?.cancel()
+            selectionWork?.cancel()
             return
         }
         pending = nil
@@ -447,6 +451,7 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
         imageLoader.cancel()
         compactLoader.cancel()
         metadataWork?.cancel()
+        selectionWork?.cancel()
 
         var subjects = items
         if subjects.isEmpty, let folderPath, let folder = FileItem.make(path: folderPath) {
@@ -506,6 +511,28 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             setTags([])
         }
 
+        let selectionWork = DispatchWorkItem { [weak self] in
+            guard let self, token == self.token else { return }
+            self.loadPreviewAndSize(item, kind: kind, token: token)
+        }
+        self.selectionWork = selectionWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: selectionWork)
+
+        // Spotlight metadata and tags, off the main thread. Lookups run one at a
+        // time; a newer selection cancels one that hasn't started yet.
+        metadataWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            let metadata = ItemMetadata.load(url)
+            DispatchQueue.main.async {
+                guard let self, token == self.token else { return }
+                self.applyMetadata(metadata)
+            }
+        }
+        metadataWork = work
+        Self.metadataQueue.asyncAfter(deadline: .now() + 0.08, execute: work)
+    }
+
+    private func loadPreviewAndSize(_ item: FileItem, kind: String, token: Int) {
         // Artwork: the item's own icon, then a thumbnail for images, movies and documents.
         if compact {
             compactLoader.load(item, into: compactPreview, points: 48, thumbnails: true, iconMode: true)
@@ -533,18 +560,6 @@ final class InspectorViewController: NSViewController, NSTokenFieldDelegate {
             }
         }
 
-        // Spotlight metadata and tags, off the main thread. Lookups run one at a
-        // time; a newer selection cancels one that hasn't started yet.
-        metadataWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            let metadata = ItemMetadata.load(url)
-            DispatchQueue.main.async {
-                guard let self, token == self.token else { return }
-                self.applyMetadata(metadata)
-            }
-        }
-        metadataWork = work
-        Self.metadataQueue.async(execute: work)
     }
 
     /// Adds the Spotlight rows and tags. Applying again (cached, then fresh

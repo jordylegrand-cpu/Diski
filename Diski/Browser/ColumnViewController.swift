@@ -118,9 +118,37 @@ final class ColumnCellView: NSTableCellView {
         didSet { chevron.contentTintColor = backgroundStyle == .emphasized ? Self.emphasizedChevron : .tertiaryLabelColor }
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            loader.cancel()
+        } else if let item = objectValue as? FileItem {
+            loader.load(item, into: icon, points: 16, thumbnails: Prefs.showThumbnailsInList, iconMode: true)
+        }
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         loader.cancel()
+    }
+}
+
+/// A column's own (vertical) scroll view. Sideways swipes and shift-scrolling
+/// belong to the strip of columns around it, so they are handed to it; without
+/// this the columns scrolled out of sight on the left cannot be reached.
+final class ColumnScrollView: NSScrollView {
+    private var forwardsHorizontal = false
+
+    override func scrollWheel(with event: NSEvent) {
+        // Decide once per gesture (momentum follows the gesture); a wheel has no phases.
+        if event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty) {
+            forwardsHorizontal = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+        }
+        if forwardsHorizontal, let strip = enclosingScrollView {
+            strip.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
     }
 }
 
@@ -132,16 +160,18 @@ final class ColumnsDocumentView: NSView {
     /// Legacy scrollers: each column's track is the divider, so no separators are drawn.
     var hidesDividers = false { didSet { if hidesDividers != oldValue { needsLayout = true } } }
 
-    var contentWidth: CGFloat { entries.reduce(0) { $0 + $1.width } }
+    private(set) var contentWidth: CGFloat = 0
 
     func append(_ view: NSView, width: CGFloat) {
         view.translatesAutoresizingMaskIntoConstraints = true
         addSubview(view)
         entries.append((view, width))
+        contentWidth += width
         needsLayout = true
     }
 
     func remove(_ view: NSView) {
+        for entry in entries where entry.view === view { contentWidth -= entry.width }
         entries.removeAll { $0.view === view }
         view.removeFromSuperview()
         needsLayout = true
@@ -149,6 +179,7 @@ final class ColumnsDocumentView: NSView {
 
     func setWidth(_ width: CGFloat, for view: NSView) {
         guard let index = entries.firstIndex(where: { $0.view === view }), entries[index].width != width else { return }
+        contentWidth += width - entries[index].width
         entries[index].width = width
         needsLayout = true
     }
@@ -175,7 +206,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     final class Column {
         let path: String
         var items: [FileItem]
-        let scroll = NSScrollView()
+        let scroll = ColumnScrollView()
         let table = ColumnTableView()
         let separator = NSBox()
 
@@ -189,7 +220,16 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     private let document = ColumnsDocumentView()
     private var columns: [Column] = []
     private var preview: NSView?
-    private(set) var activeColumn = 0
+    private(set) var activeColumn = 0 {
+        didSet { if activeColumn != oldValue { revealActiveColumn() } }
+    }
+
+    /// Arrowing left or right into a column scrolled out of sight brings it back into view.
+    private func revealActiveColumn() {
+        guard !isSyncing, activeColumn < columns.count else { return }
+        document.layoutSubtreeIfNeeded()
+        document.scrollToVisible(columns[activeColumn].scroll.frame)
+    }
     private var isSyncing = false
     private var renamingItem: FileItem?
     private let contextMenu = NSMenu()
@@ -279,8 +319,13 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     }
 
     override func willDeactivate() {
-        for column in columns { DirectoryStore.shared.endWatching(column.path) }
+        for column in columns {
+            DirectoryStore.shared.endWatching(column.path)
+            document.remove(column.scroll)
+            document.remove(column.separator)
+        }
         columns.removeAll()
+        removePreview()
     }
 
     /// The deepest folder shown (window title, path bar).
@@ -336,10 +381,11 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
         var chain: [String] = []
         var current = path
         while true {
-            chain.insert(current, at: 0)
+            chain.append(current)
             if current == root || current == "/" { break }
             current = (current as NSString).deletingLastPathComponent
         }
+        chain.reverse()
         for (index, directory) in chain.enumerated() {
             let arranged: [FileItem]
             if directory == path {
@@ -404,7 +450,7 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
 
         document.append(column.scroll, width: Self.fittedWidth(for: items))
         document.append(column.separator, width: 1)
-        resizeDocument()
+        if !isSyncing { resizeDocument() }
         columns.append(column)
         DirectoryStore.shared.beginWatching(path)
         table.reloadData()
@@ -423,7 +469,10 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
     }
 
     private func removePreview() {
-        if let preview { document.remove(preview) }
+        if let preview {
+            previewController.show(items: [], folderPath: nil)
+            document.remove(preview)
+        }
         preview = nil
         resizeDocument()
     }
@@ -642,6 +691,15 @@ final class ColumnViewController: FileViewController, NSTableViewDataSource, NST
                   let cell = column.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ColumnCellView,
                   let window = view.window else { continue }
             return window.convertToScreen(cell.icon.convert(cell.icon.bounds, to: nil))
+        }
+        return nil
+    }
+
+    override func iconImage(for file: FileItem) -> NSImage? {
+        for column in columns {
+            guard let row = column.items.firstIndex(where: { $0 === file }),
+                  let cell = column.table.view(atColumn: 0, row: row, makeIfNecessary: false) as? ColumnCellView else { continue }
+            return cell.icon.image
         }
         return nil
     }

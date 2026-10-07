@@ -8,6 +8,14 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
     private weak var pane: PaneViewController?
     private let stack = NSStackView()
     private var observers: [NSObjectProtocol] = []
+    private var shownPreferences: [String] = []
+    private var refreshScheduled = false
+
+    private var preferenceSnapshot: [String] {
+        [String(Prefs.rowDensity.rawValue), String(Double(Prefs.iconSize)), String(Prefs.foldersOnTop),
+         Prefs.listColumns.joined(separator: "|"), String(Prefs.calculateFolderSizes),
+         String(Prefs.showThumbnailsInList), String(Prefs.showHiddenFiles)]
+    }
 
     private init() {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 270, height: 400),
@@ -44,7 +52,14 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         })
         observers.append(center.addObserver(forName: Prefs.didChange, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.window?.isVisible == true, !self.isApplying else { return }
-            self.rebuild()
+            guard self.preferenceSnapshot != self.shownPreferences, !self.refreshScheduled else { return }
+            self.refreshScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.refreshScheduled = false
+                guard self.window?.isVisible == true, self.preferenceSnapshot != self.shownPreferences else { return }
+                self.rebuild()
+            }
         })
     }
 
@@ -105,6 +120,7 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
 
     private func rebuild() {
         guard let pane, let window else { return }
+        shownPreferences = preferenceSnapshot
         window.title = pane.isSearchResults ? pane.displayTitle : FileManager.default.displayName(atPath: pane.displayedPath)
         for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
 
@@ -230,6 +246,7 @@ final class ViewOptionsPanel: NSWindowController, NSWindowDelegate {
         isApplying = true
         body()
         isApplying = false
+        shownPreferences = preferenceSnapshot
     }
 
     @objc private func sortChanged(_ sender: NSPopUpButton) {

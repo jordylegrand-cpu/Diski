@@ -74,7 +74,28 @@ enum Prefs {
     static let didChange = Notification.Name("DiskiPrefsDidChange")
     private static let defaults = UserDefaults.standard
 
+    private static let cacheLock = NSLock()
+    private static var cachedValues: [String: Any] = [:]
+    private static let defaultsObserver = NotificationCenter.default.addObserver(
+        forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
+    ) { _ in
+        cacheLock.lock()
+        cachedValues.removeAll()
+        cacheLock.unlock()
+    }
+
+    private static func cached<T>(_ key: String, read: () -> T) -> T {
+        _ = defaultsObserver
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let value = cachedValues[key] as? T { return value }
+        let value = read()
+        cachedValues[key] = value
+        return value
+    }
+
     static func register() {
+        _ = defaultsObserver
         defaults.register(defaults: [
             "automaticUpdates": true,
             "showHiddenFiles": false,
@@ -87,7 +108,7 @@ enum Prefs {
             "defaultViewMode": ViewMode.list.rawValue,
             "showPathBar": true,
             "showStatusInfo": true,
-            "showInspector": true,
+            "showPreviewPane": false,
             "rowDensity": RowDensity.comfortable.rawValue,
             "iconSize": 64.0,
             "sortKey": SortKey.name.rawValue,
@@ -112,125 +133,128 @@ enum Prefs {
     private static func store<T: Equatable>(_ value: T, forKey key: String, notify: Bool = true) {
         if let current = defaults.object(forKey: key) as? T, current == value { return }
         defaults.set(value, forKey: key)
+        cacheLock.lock()
+        cachedValues.removeValue(forKey: key)
+        cacheLock.unlock()
         if notify { changed(key) }
     }
 
     static var automaticUpdates: Bool {
-        get { defaults.bool(forKey: "automaticUpdates") }
+        get { cached("automaticUpdates") { defaults.bool(forKey: "automaticUpdates") } }
         set { store(newValue, forKey: "automaticUpdates") }
     }
 
     static var showHiddenFiles: Bool {
-        get { defaults.bool(forKey: "showHiddenFiles") }
+        get { cached("showHiddenFiles") { defaults.bool(forKey: "showHiddenFiles") } }
         set { store(newValue, forKey: "showHiddenFiles") }
     }
 
     static var foldersOnTop: Bool {
-        get { defaults.bool(forKey: "foldersOnTop") }
+        get { cached("foldersOnTop") { defaults.bool(forKey: "foldersOnTop") } }
         set { store(newValue, forKey: "foldersOnTop") }
     }
 
     static var showFullPathInTitle: Bool {
-        get { defaults.bool(forKey: "showFullPathInTitle") }
+        get { cached("showFullPathInTitle") { defaults.bool(forKey: "showFullPathInTitle") } }
         set { store(newValue, forKey: "showFullPathInTitle") }
     }
 
     static var calculateFolderSizes: Bool {
-        get { defaults.bool(forKey: "calculateFolderSizes") }
+        get { cached("calculateFolderSizes") { defaults.bool(forKey: "calculateFolderSizes") } }
         set { store(newValue, forKey: "calculateFolderSizes") }
     }
 
     static var useClones: Bool {
-        get { defaults.bool(forKey: "useClones") }
+        get { cached("useClones") { defaults.bool(forKey: "useClones") } }
         set { store(newValue, forKey: "useClones") }
     }
 
     /// Parallel copy streams; 0 means automatic.
     static var copyStreams: Int {
         get {
-            let value = defaults.integer(forKey: "copyStreams")
+            let value = cached("copyStreams") { defaults.integer(forKey: "copyStreams") }
             return value > 0 ? value : max(4, min(8, ProcessInfo.processInfo.activeProcessorCount))
         }
         set { store(newValue, forKey: "copyStreams") }
     }
 
     static var copyStreamsSetting: Int {
-        get { defaults.integer(forKey: "copyStreams") }
+        get { cached("copyStreams") { defaults.integer(forKey: "copyStreams") } }
         set { store(newValue, forKey: "copyStreams") }
     }
 
     static var returnKeyOpens: Bool {
-        get { defaults.bool(forKey: "returnKeyOpens") }
+        get { cached("returnKeyOpens") { defaults.bool(forKey: "returnKeyOpens") } }
         set { store(newValue, forKey: "returnKeyOpens") }
     }
 
     static var defaultViewMode: ViewMode {
-        get { ViewMode(rawValue: defaults.integer(forKey: "defaultViewMode")) ?? .list }
+        get { cached("defaultViewMode") { ViewMode(rawValue: defaults.integer(forKey: "defaultViewMode")) ?? .list } }
         set { store(newValue.rawValue, forKey: "defaultViewMode") }
     }
 
     static var showPathBar: Bool {
-        get { defaults.bool(forKey: "showPathBar") }
+        get { cached("showPathBar") { defaults.bool(forKey: "showPathBar") } }
         set { store(newValue, forKey: "showPathBar") }
     }
 
     static var showStatusInfo: Bool {
-        get { defaults.bool(forKey: "showStatusInfo") }
+        get { cached("showStatusInfo") { defaults.bool(forKey: "showStatusInfo") } }
         set { store(newValue, forKey: "showStatusInfo") }
     }
 
     static var showInspector: Bool {
-        get { defaults.bool(forKey: "showInspector") }
-        set { store(newValue, forKey: "showInspector", notify: false) }
+        get { cached("showPreviewPane") { defaults.bool(forKey: "showPreviewPane") } }
+        set { store(newValue, forKey: "showPreviewPane", notify: false) }
     }
 
     static var rowDensity: RowDensity {
-        get { RowDensity(rawValue: defaults.integer(forKey: "rowDensity")) ?? .comfortable }
+        get { cached("rowDensity") { RowDensity(rawValue: defaults.integer(forKey: "rowDensity")) ?? .comfortable } }
         set { store(newValue.rawValue, forKey: "rowDensity") }
     }
 
     static var iconSize: CGFloat {
-        get { CGFloat(defaults.double(forKey: "iconSize")) }
+        get { cached("iconSize") { CGFloat(defaults.double(forKey: "iconSize")) } }
         set { store(Double(newValue), forKey: "iconSize") }
     }
 
     static var sortKey: SortKey {
-        get { SortKey(rawValue: defaults.string(forKey: "sortKey") ?? "") ?? .name }
+        get { cached("sortKey") { SortKey(rawValue: defaults.string(forKey: "sortKey") ?? "") ?? .name } }
         set { store(newValue.rawValue, forKey: "sortKey", notify: false) }
     }
 
     static var sortAscending: Bool {
-        get { defaults.bool(forKey: "sortAscending") }
+        get { cached("sortAscending") { defaults.bool(forKey: "sortAscending") } }
         set { store(newValue, forKey: "sortAscending", notify: false) }
     }
 
     static var confirmEmptyTrash: Bool {
-        get { defaults.bool(forKey: "confirmEmptyTrash") }
+        get { cached("confirmEmptyTrash") { defaults.bool(forKey: "confirmEmptyTrash") } }
         set { store(newValue, forKey: "confirmEmptyTrash") }
     }
 
     static var showThumbnailsInList: Bool {
-        get { defaults.bool(forKey: "showThumbnailsInList") }
+        get { cached("showThumbnailsInList") { defaults.bool(forKey: "showThumbnailsInList") } }
         set { store(newValue, forKey: "showThumbnailsInList") }
     }
 
     static var showOperationToasts: Bool {
-        get { defaults.bool(forKey: "showOperationToasts") }
+        get { cached("showOperationToasts") { defaults.bool(forKey: "showOperationToasts") } }
         set { store(newValue, forKey: "showOperationToasts") }
     }
 
     static var listColumns: [String] {
-        get { defaults.stringArray(forKey: "listColumns") ?? ["modified", "size", "kind"] }
+        get { cached("listColumns") { defaults.stringArray(forKey: "listColumns") ?? ["modified", "size", "kind"] } }
         set { store(newValue, forKey: "listColumns") }
     }
 
     static var terminalBundleID: String {
-        get { defaults.string(forKey: "terminalBundleID") ?? "com.apple.Terminal" }
+        get { cached("terminalBundleID") { defaults.string(forKey: "terminalBundleID") ?? "com.apple.Terminal" } }
         set { store(newValue, forKey: "terminalBundleID") }
     }
 
     static var newWindowPath: String {
-        get { defaults.string(forKey: "newWindowPath") ?? NSHomeDirectory() }
+        get { cached("newWindowPath") { defaults.string(forKey: "newWindowPath") ?? NSHomeDirectory() } }
         set { store(newValue, forKey: "newWindowPath") }
     }
 
@@ -246,7 +270,7 @@ enum Prefs {
     }
 
     static var recentFolders: [String] {
-        get { defaults.stringArray(forKey: "recentFolders") ?? [] }
+        get { cached("recentFolders") { defaults.stringArray(forKey: "recentFolders") ?? [] } }
         set { store(Array(newValue.prefix(40)), forKey: "recentFolders", notify: false) }
     }
 

@@ -37,6 +37,67 @@ final class FileCollectionView: NSCollectionView {
     }
 }
 
+final class CollectionImagePrefetcher {
+    private weak var collection: NSCollectionView?
+    private var observer: NSObjectProtocol?
+    private var pending: DispatchWorkItem?
+    private var tokens: [String: String] = [:]
+    private let content: () -> ([FileItem], CGFloat)
+
+    init(collection: NSCollectionView, clip: NSClipView, content: @escaping () -> ([FileItem], CGFloat)) {
+        self.collection = collection
+        self.content = content
+        clip.postsBoundsChangedNotifications = true
+        observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                                                          object: clip, queue: .main) { [weak self] _ in
+            self?.schedule()
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        cancel()
+    }
+
+    func cancel() {
+        pending?.cancel()
+        pending = nil
+        for token in tokens.values { ThumbnailCache.shared.cancel(token) }
+        tokens.removeAll()
+    }
+
+    func schedule() {
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.prefetch() }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+    }
+
+    private func prefetch() {
+        guard let collection else { return }
+        let visible = collection.indexPathsForVisibleItems().map { $0.item }
+        guard let first = visible.min(), let last = visible.max() else { cancel(); return }
+        let (items, points) = content()
+        let count = min(64, max(1, visible.count))
+        let lower = max(0, first - count), upper = min(items.count, last + count + 1)
+        guard lower < upper else { cancel(); return }
+        let candidates = (lower..<upper).filter { $0 < first || $0 > last }.map { items[$0] }
+        let wanted = Set(candidates.map { $0.path })
+        for path in Array(tokens.keys) where !wanted.contains(path) {
+            ThumbnailCache.shared.cancel(tokens.removeValue(forKey: path))
+        }
+        let scale = collection.window?.backingScaleFactor ?? 2
+        for item in candidates where tokens[item.path] == nil && FileKinds.wantsThumbnail(item) {
+            guard ThumbnailCache.shared.cached(for: item, points: points, iconMode: true) == nil else { continue }
+            let path = item.path
+            if let token = ThumbnailCache.shared.request(for: item, points: points, scale: scale, iconMode: true,
+                                                         completion: { [weak self] _ in self?.tokens.removeValue(forKey: path) }) {
+                tokens[path] = token
+            }
+        }
+    }
+}
+
 /// Finder's icon-view names: up to two lines, broken after a space, hyphen,
 /// underscore or dot when possible, and the second line shortened in the
 /// middle so the end of the name (its extension) stays visible.
@@ -168,7 +229,7 @@ final class IconItemView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func setIconSize(_ size: CGFloat) {
-        iconSize.constant = size
+        if iconSize.constant != size { iconSize.constant = size }
     }
 
     /// Shows `fullName` laid out like Finder for an item `itemWidth` wide.
@@ -288,6 +349,7 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
     private var draggedItems: [FileItem] = []
     /// Whole points: the size slider is continuous.
     private var iconSize: CGFloat = 64
+    private var prefetcher: CollectionImagePrefetcher?
 
     override func loadView() {
         configureLayout()
@@ -316,6 +378,9 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         view = scrollView
+        prefetcher = CollectionImagePrefetcher(collection: collectionView, clip: scrollView.contentView) { [weak self] in
+            (self?.items ?? [], self?.iconSize ?? 64)
+        }
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(windowKeyChanged(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
@@ -362,6 +427,8 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
 
     override func itemsDidChange(from previous: [FileItem], changes: DirectoryStore.Changes?, reset: Bool) {
         guard isViewLoaded else { return }
+        prefetcher?.cancel()
+        prefetcher?.schedule()
         if reset || changes == nil || changes?.isInitialLoad == true {
             let selection = reset ? [] : selectedItems
             collectionView.reloadData()
@@ -430,6 +497,24 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
         collectionView.makeSupplementaryView(ofKind: kind, withIdentifier: IconViewController.gapIdentifier, for: indexPath)
     }
 
+    override func willDeactivate() {
+        prefetcher?.cancel()
+        for case let item as IconViewItem in collectionView.visibleItems() { item.loader.cancel() }
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, willDisplay item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        guard let cell = item as? IconViewItem, indexPath.item < items.count else { return }
+        let file = items[indexPath.item]
+        cell.configure(file, iconSize: iconSize, itemWidth: layout.itemSize.width,
+                       dimmed: pane?.isCut(file) ?? false)
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        (item as? IconViewItem)?.loader.cancel()
+    }
+
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         notifySelectionChanged()
     }
@@ -491,6 +576,12 @@ final class IconViewController: FileViewController, NSCollectionViewDataSource, 
               let window = view.window else { return nil }
         let icon = item.itemView.icon
         return window.convertToScreen(icon.convert(icon.bounds, to: nil))
+    }
+
+    override func iconImage(for file: FileItem) -> NSImage? {
+        guard let index = items.firstIndex(where: { $0 === file }),
+              let item = collectionView.item(at: IndexPath(item: index, section: 0)) as? IconViewItem else { return nil }
+        return item.itemView.icon.image
     }
 
     private func typeSelect(_ text: String) {
