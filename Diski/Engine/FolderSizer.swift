@@ -43,6 +43,8 @@ final class FolderSizer {
     /// When the last walk of a slow folder ended and how long it took.
     private var lastWalks: [String: (end: Date, duration: TimeInterval)] = [:]
     private let maxAge: TimeInterval = 180
+    /// Bounds `cache`, `walked` and `lastWalks`, which otherwise grow with every folder ever walked.
+    var maxCached = 20_000
 
     private init() {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
@@ -191,13 +193,16 @@ final class FolderSizer {
         }
         // Only slow folders are remembered (and so ever deferred).
         if duration >= 0.01 {
+            if lastWalks.count >= maxCached { lastWalks.removeAll(keepingCapacity: true) }
             lastWalks[path] = (end: Date(), duration: duration)
         } else {
             lastWalks.removeValue(forKey: path)
         }
         let result = Result(bytes: bytes, items: items, computedAt: Date())
         // A walk that raced with changes is still worth showing, but not caching.
+        if cache.count >= maxCached { cache.removeAll(keepingCapacity: true) }
         if !walk.isStale { cache[path] = result }
+        if walked.count >= maxCached { walked.removeAll(keepingCapacity: true) }
         walked.insert(path)
         remember(path, bytes: bytes)
         for callback in waiting.removeValue(forKey: path) ?? [] { callback(result) }
@@ -248,6 +253,18 @@ final class FolderSizer {
         }
     }
 
+    /// Drops cached sizes at or under each root and marks their running walks
+    /// stale: after dropped FSEvents nothing inside the root can be trusted.
+    /// The roots' ancestors are handled by `invalidate(changedPaths:)`.
+    func invalidate(subtrees: [String]) {
+        guard !subtrees.isEmpty, !cache.isEmpty || !jobs.isEmpty else { return }
+        let roots = subtrees.map(DirectoryReader.normalized)
+        cache = cache.filter { entry in !roots.contains { DirectoryReader.isPath(entry.key, atOrUnder: $0) } }
+        for (path, walk) in jobs where roots.contains(where: { DirectoryReader.isPath(path, atOrUnder: $0) }) {
+            walk.isStale = true
+        }
+    }
+
     // MARK: - Walk
 
     final class Walk {
@@ -257,6 +274,9 @@ final class FolderSizer {
         private var stack: [String]
         private var bytes: Int64 = 0
         private var items = 0
+        /// Inodes of hard-linked files already counted: each is counted once per walk.
+        /// The walk stays on one volume (mount points are skipped), so inode numbers are unique.
+        private var seenLinks = Set<UInt64>()
         private var cancelled = false
         private var lastReport = Date.distantPast
         var onProgress: ((Int64) -> Void)?
@@ -303,7 +323,7 @@ final class FolderSizer {
                 buffer = reader
                 var entriesUntilCancellationCheck = 0
                 var continuing = true
-                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader, shouldContinue: {
+                try? DirectoryReader.forEachRawEntry(inDirectory: directory, buffer: reader, linkInfo: true, shouldContinue: {
                     if entriesUntilCancellationCheck == 0 {
                         continuing = !self.isCancelled
                         entriesUntilCancellationCheck = 256
@@ -314,7 +334,7 @@ final class FolderSizer {
                     localItems += 1
                     if entry.isDirectory {
                         if !entry.isMountPoint && !entry.isDataless { subdirectories.append(prefix + entry.nameString) }
-                    } else if entry.size > 0 {
+                    } else if entry.size > 0, entry.linkCount <= 1 || self.seenLinks.insert(entry.fileID).inserted {
                         localBytes += entry.size
                     }
                 }

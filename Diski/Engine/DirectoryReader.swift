@@ -32,6 +32,7 @@ enum DirectoryReader {
     private static let dirEntryCount: attrgroup_t = 0x0000_0002
     private static let dirMountStatus: attrgroup_t = 0x0000_0004
 
+    private static let fileLinkCount: attrgroup_t = 0x0000_0001
     private static let fileTotalSize: attrgroup_t = 0x0000_0002
     private static let fileAllocSize: attrgroup_t = 0x0000_0004
 
@@ -108,18 +109,21 @@ enum DirectoryReader {
         let size: Int64
         let isMountPoint: Bool
         let flags: UInt32
+        /// Only filled when `forEachRawEntry` is called with `linkInfo`.
+        let fileID: UInt64
+        let linkCount: UInt32
 
         var isDataless: Bool { flags & 0x4000_0000 != 0 }
 
         var isDirectory: Bool { objectType == DirectoryReader.vDIR }
         var isSymlink: Bool { objectType == DirectoryReader.vLNK }
-        var isRegularFile: Bool { objectType == DirectoryReader.vREG }
         var nameString: String { String(cString: name) }
     }
 
     /// The fastest possible listing: name, type, size and mount status only.
     /// Used by recursive size calculation and the copy engine's tree scan.
-    static func forEachRawEntry(inDirectory rawPath: String, buffer: Buffer? = nil,
+    /// `linkInfo` also reads each entry's inode number and hard-link count.
+    static func forEachRawEntry(inDirectory rawPath: String, buffer: Buffer? = nil, linkInfo: Bool = false,
                                 shouldContinue: (() -> Bool)? = nil, _ body: (RawEntry) -> Void) throws {
         let path = normalized(rawPath)
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -129,8 +133,9 @@ enum DirectoryReader {
         var request = attrlist()
         request.bitmapcount = 5
         request.commonattr = cmnReturnedAttrs | cmnError | cmnName | cmnObjType | cmnFlags
+        if linkInfo { request.commonattr |= cmnFileID }
         request.dirattr = dirMountStatus
-        request.fileattr = fileTotalSize
+        request.fileattr = linkInfo ? fileLinkCount | fileTotalSize : fileTotalSize
 
         let storage = buffer ?? Buffer()
         defer { withExtendedLifetime(storage) {} }
@@ -170,9 +175,19 @@ enum DirectoryReader {
                     flags = field.loadUnaligned(as: UInt32.self)
                     field = field.advanced(by: 4)
                 }
+                var fileID: UInt64 = 0
+                if returned.commonattr & cmnFileID != 0 {
+                    fileID = field.loadUnaligned(as: UInt64.self)
+                    field = field.advanced(by: 8)
+                }
                 var isMount = false
                 if returned.dirattr & dirMountStatus != 0 {
                     isMount = field.loadUnaligned(as: UInt32.self) & 0x1 != 0
+                    field = field.advanced(by: 4)
+                }
+                var linkCount: UInt32 = 0
+                if returned.fileattr & fileLinkCount != 0 {
+                    linkCount = field.loadUnaligned(as: UInt32.self)
                     field = field.advanced(by: 4)
                 }
                 var size: Int64 = 0
@@ -181,7 +196,8 @@ enum DirectoryReader {
                     field = field.advanced(by: 8)
                 }
                 if let namePointer, !failed || objectType != 0 {
-                    body(RawEntry(name: namePointer, objectType: objectType, size: size, isMountPoint: isMount, flags: flags))
+                    body(RawEntry(name: namePointer, objectType: objectType, size: size, isMountPoint: isMount, flags: flags,
+                                      fileID: fileID, linkCount: linkCount))
                 }
                 entry = entry.advanced(by: length)
             }
@@ -196,6 +212,11 @@ enum DirectoryReader {
     static func normalized(_ path: String) -> String {
         if path != "/" && path.utf8.last == UInt8(ascii: "/") { return String(path.dropLast()) }
         return path.isEmpty ? "/" : path
+    }
+
+    /// Whether `path` is `root` or lies inside it; both normalized.
+    static func isPath(_ path: String, atOrUnder root: String) -> Bool {
+        path == root || path.hasPrefix(root == "/" ? "/" : root + "/")
     }
 
     private static func parse(entry: UnsafeRawPointer, parentPath: String, detailed: Bool,
