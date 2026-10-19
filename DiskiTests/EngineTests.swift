@@ -319,6 +319,66 @@ final class EngineTests: XCTestCase {
         XCTAssertNil(sizer.cached(path))
     }
 
+    // MARK: Item updates, caches
+
+    private func makeItem(type: EntryType = .file, size: Int64 = 10, allocatedSize: Int64 = 4096, mode: UInt32 = 0o644,
+                          added: Double = 100, isMountPoint: Bool = false, linkTargetIsDirectory: Bool = false) -> FileItem {
+        FileItem(name: "x", parentPath: "/tmp", type: type, fileID: 1, size: size, allocatedSize: allocatedSize,
+                 created: 1, modified: 2, added: added, finderFlags: 0, bsdFlags: 0, mode: mode, childCount: -1,
+                 isMountPoint: isMountPoint, linkTargetIsDirectory: linkTargetIsDirectory)
+    }
+
+    func testUpdateReportsEveryCopiedField() {
+        // `chmod +x` changes only the mode (and ctime): the Kind column and icon must refresh.
+        let variants: [(String, FileItem)] = [
+            ("mode", makeItem(mode: 0o755)),
+            ("allocatedSize", makeItem(allocatedSize: 8192)),
+            ("added", makeItem(added: 200)),
+            ("isMountPoint", makeItem(isMountPoint: true)),
+            ("linkTargetIsDirectory", makeItem(linkTargetIsDirectory: true)),
+        ]
+        for (field, other) in variants {
+            XCTAssertTrue(makeItem().update(from: other), "a changed \(field) is not reported")
+        }
+        XCTAssertFalse(makeItem().update(from: makeItem()))
+    }
+
+    func testFolderSizeCacheIsCapped() throws {
+        let sizer = FolderSizer.shared
+        let original = sizer.maxCached
+        sizer.maxCached = 2
+        addTeardownBlock { sizer.maxCached = original }
+        var paths: [String] = []
+        for i in 0..<3 {
+            try makeFile("cap\(i)/f.bin", size: 100)
+            let path = root.appendingPathComponent("cap\(i)").path
+            paths.append(path)
+            let done = expectation(description: "walk \(i)")
+            sizer.size(of: path) { _ in done.fulfill() }
+            wait(for: [done], timeout: 10)
+        }
+        XCTAssertNil(sizer.cached(paths[0]), "the oldest entry survived the cap")
+        XCTAssertNotNil(sizer.cached(paths[2]))
+    }
+
+    func testThumbnailKeyIncludesScale() throws {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8,
+                                                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        for x in 0..<64 { for y in 0..<64 { rep.setColor(NSColor(red: CGFloat(x) / 64, green: CGFloat(y) / 64, blue: 0.5, alpha: 1), atX: x, y: y) } }
+        let url = root.appendingPathComponent("pic-\(UUID().uuidString).png")
+        try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
+        let item = try XCTUnwrap(FileItem.make(path: url.path))
+
+        let done = expectation(description: "1x thumbnail delivered")
+        var delivered: NSImage?
+        ThumbnailCache.shared.request(for: item, points: 64, scale: 1) { delivered = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertNotNil(delivered, "Quick Look produced no thumbnail in the test host")
+        XCTAssertNotNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 1))
+        XCTAssertNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 2), "a 1x thumbnail served a 2x request")
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {
