@@ -9,7 +9,9 @@ final class DirectoryWatcher {
     /// the folders whose contents changed (the parent of every changed item,
     /// plus folders that changed themselves), used to invalidate folder sizes.
     /// A batch of thousands of file events reports each folder once.
-    var onChange: ((_ directories: Set<String>, _ folders: [String]) -> Void)?
+    /// `subtrees` are the roots whose events were coalesced or dropped
+    /// (anything inside may have changed): they need a full rescan.
+    var onChange: ((_ directories: Set<String>, _ folders: [String], _ subtrees: [String]) -> Void)?
 
     private var stream: FSEventStreamRef?
     /// Written on the main thread, read on the event queue.
@@ -36,14 +38,6 @@ final class DirectoryWatcher {
         if let old { queue.async { DirectoryWatcher.release(old) } }
     }
 
-    func stop() {
-        lock.lock()
-        watched = []
-        lock.unlock()
-        if let stream { DirectoryWatcher.release(stream) }
-        stream = nil
-    }
-
     private func makeStream(for paths: Set<String>) -> FSEventStreamRef? {
         var context = FSEventStreamContext(version: 0,
                                            info: Unmanaged.passUnretained(self).toOpaque(),
@@ -54,12 +48,13 @@ final class DirectoryWatcher {
             let array = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as NSArray
             let fileFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
             let dirFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
-            var events: [(path: String, isFile: Bool)] = []
+            var events: [(path: String, isFile: Bool, rescan: Bool)] = []
             events.reserveCapacity(count)
             for index in 0..<min(count, array.count) {
                 guard let path = array[index] as? String else { continue }
                 let itemFlags = eventFlags[index]
-                events.append((path: path, isFile: (itemFlags & fileFlag) != 0 && (itemFlags & dirFlag) == 0))
+                events.append((path: path, isFile: (itemFlags & fileFlag) != 0 && (itemFlags & dirFlag) == 0,
+                               rescan: DirectoryWatcher.isRescan(itemFlags)))
             }
             watcher.handle(events)
         }
@@ -75,6 +70,14 @@ final class DirectoryWatcher {
         return stream
     }
 
+    /// Events that were coalesced or dropped: anything under their path may have changed.
+    static func isRescan(_ flags: FSEventStreamEventFlags) -> Bool {
+        let mask = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs
+                                           | kFSEventStreamEventFlagUserDropped
+                                           | kFSEventStreamEventFlagKernelDropped)
+        return flags & mask != 0
+    }
+
     private static func release(_ stream: FSEventStreamRef) {
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
@@ -88,18 +91,19 @@ final class DirectoryWatcher {
 
     /// Runs on the event queue: reduces a batch of item events to the folders
     /// involved, so the main thread sees each folder once.
-    private func handle(_ events: [(path: String, isFile: Bool)]) {
+    func handle(_ events: [(path: String, isFile: Bool, rescan: Bool)]) {
         lock.lock()
         let watched = self.watched
         lock.unlock()
         var parents = Set<String>()
         var changedFolders = Set<String>()
+        var rescanRoots = Set<String>()
         for event in events {
-            var path = event.path
-            if path != "/" && path.utf8.last == UInt8(ascii: "/") { path.removeLast() }
+            let path = DirectoryReader.normalized(event.path)
             // Folders that changed themselves (created, renamed, attributes),
             // and watched items. Events without item flags count as folders.
             if !event.isFile || watched.contains(path) { changedFolders.insert(path) }
+            if event.rescan { rescanRoots.insert(path) }
             let parent = Self.parent(of: path)
             if !parent.isEmpty { parents.insert(parent) }
         }
@@ -118,9 +122,9 @@ final class DirectoryWatcher {
         }
         let folders = parents.union(changedFolders)
         guard !folders.isEmpty else { return }
-        let changed = Array(folders)
+        let changed = Array(folders), subtrees = Array(rescanRoots)
         DispatchQueue.main.async { [weak self] in
-            self?.onChange?(hit, changed)
+            self?.onChange?(hit, changed, subtrees)
         }
     }
 }

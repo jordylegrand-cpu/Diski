@@ -319,6 +319,66 @@ final class EngineTests: XCTestCase {
         XCTAssertNil(sizer.cached(path))
     }
 
+    // MARK: Item updates, caches
+
+    private func makeItem(type: EntryType = .file, size: Int64 = 10, allocatedSize: Int64 = 4096, mode: UInt32 = 0o644,
+                          added: Double = 100, isMountPoint: Bool = false, linkTargetIsDirectory: Bool = false) -> FileItem {
+        FileItem(name: "x", parentPath: "/tmp", type: type, fileID: 1, size: size, allocatedSize: allocatedSize,
+                 created: 1, modified: 2, added: added, finderFlags: 0, bsdFlags: 0, mode: mode, childCount: -1,
+                 isMountPoint: isMountPoint, linkTargetIsDirectory: linkTargetIsDirectory)
+    }
+
+    func testUpdateReportsEveryCopiedField() {
+        // `chmod +x` changes only the mode (and ctime): the Kind column and icon must refresh.
+        let variants: [(String, FileItem)] = [
+            ("mode", makeItem(mode: 0o755)),
+            ("allocatedSize", makeItem(allocatedSize: 8192)),
+            ("added", makeItem(added: 200)),
+            ("isMountPoint", makeItem(isMountPoint: true)),
+            ("linkTargetIsDirectory", makeItem(linkTargetIsDirectory: true)),
+        ]
+        for (field, other) in variants {
+            XCTAssertTrue(makeItem().update(from: other), "a changed \(field) is not reported")
+        }
+        XCTAssertFalse(makeItem().update(from: makeItem()))
+    }
+
+    func testFolderSizeCacheIsCapped() throws {
+        let sizer = FolderSizer.shared
+        let original = sizer.maxCached
+        sizer.maxCached = 2
+        addTeardownBlock { sizer.maxCached = original }
+        var paths: [String] = []
+        for i in 0..<3 {
+            try makeFile("cap\(i)/f.bin", size: 100)
+            let path = root.appendingPathComponent("cap\(i)").path
+            paths.append(path)
+            let done = expectation(description: "walk \(i)")
+            sizer.size(of: path) { _ in done.fulfill() }
+            wait(for: [done], timeout: 10)
+        }
+        XCTAssertNil(sizer.cached(paths[0]), "the oldest entry survived the cap")
+        XCTAssertNotNil(sizer.cached(paths[2]))
+    }
+
+    func testThumbnailKeyIncludesScale() throws {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8,
+                                                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        for x in 0..<64 { for y in 0..<64 { rep.setColor(NSColor(red: CGFloat(x) / 64, green: CGFloat(y) / 64, blue: 0.5, alpha: 1), atX: x, y: y) } }
+        let url = root.appendingPathComponent("pic-\(UUID().uuidString).png")
+        try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
+        let item = try XCTUnwrap(FileItem.make(path: url.path))
+
+        let done = expectation(description: "1x thumbnail delivered")
+        var delivered: NSImage?
+        ThumbnailCache.shared.request(for: item, points: 64, scale: 1) { delivered = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertNotNil(delivered, "Quick Look produced no thumbnail in the test host")
+        XCTAssertNotNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 1))
+        XCTAssertNil(ThumbnailCache.shared.cached(for: item, points: 64, scale: 2), "a 1x thumbnail served a 2x request")
+    }
+
     // MARK: Performance
 
     func testListingSpeedAgainstFileManager() throws {
@@ -340,5 +400,88 @@ final class EngineTests: XCTestCase {
         print(String(format: "DISKI-BENCH listing 3000 files: Diski %.2f ms, FileManager %.2f ms (%.1fx)",
                      diski * 1000, foundation * 1000, foundation / diski))
         XCTAssertLessThan(diski, foundation)
+    }
+
+    // MARK: PR-D2 hard links, rescan events
+
+    func testFolderSizeCountsHardLinksOnce() throws {
+        let big = try makeFile("links/big.bin", size: 5000)
+        try makeFile("links/small.bin", size: 100)
+        try FileManager.default.linkItem(at: big, to: root.appendingPathComponent("links/big-link.bin"))
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("links/sub"), withIntermediateDirectories: true)
+        try FileManager.default.linkItem(at: big, to: root.appendingPathComponent("links/sub/big-link2.bin"))
+        let (bytes, items) = FolderSizer.Walk(root: root.appendingPathComponent("links").path).run()
+        XCTAssertEqual(bytes, 5100)
+        XCTAssertEqual(items, 5, "every link still counts as an item")
+    }
+
+    func testSubtreeInvalidationDropsCachedDescendants() throws {
+        try makeFile("tree/child/a.bin", size: 100)
+        try makeFile("tree2/b.bin", size: 100)
+        let sizer = FolderSizer.shared
+        let paths = ["tree", "tree/child", "tree2"].map { root.appendingPathComponent($0).path }
+        for path in paths {
+            let done = expectation(description: path)
+            sizer.size(of: path) { _ in done.fulfill() }
+            wait(for: [done], timeout: 10)
+            XCTAssertNotNil(sizer.cached(path))
+        }
+        sizer.invalidate(subtrees: [paths[0]])
+        XCTAssertNil(sizer.cached(paths[0]))
+        XCTAssertNil(sizer.cached(paths[1]), "a cached descendant survived")
+        XCTAssertNotNil(sizer.cached(paths[2]), "a sibling that only shares the name prefix was dropped")
+        sizer.invalidate(subtrees: ["/"])
+        XCTAssertNil(sizer.cached(paths[2]), "the root `/` did not drop a cached folder")
+    }
+
+    func testRescanFlagsAreRecognized() {
+        let dir = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+        for flag in [kFSEventStreamEventFlagMustScanSubDirs, kFSEventStreamEventFlagUserDropped, kFSEventStreamEventFlagKernelDropped] {
+            XCTAssertTrue(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag)), "flag \(flag)")
+            XCTAssertTrue(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag) | dir), "flag \(flag) with ItemIsDir")
+        }
+        for flag in [0, kFSEventStreamEventFlagItemIsFile, kFSEventStreamEventFlagItemIsDir, kFSEventStreamEventFlagItemModified] {
+            XCTAssertFalse(DirectoryWatcher.isRescan(FSEventStreamEventFlags(flag)), "flag \(flag)")
+        }
+    }
+
+    func testRescanEventReachesWatcherCallback() throws {
+        let tree = root.appendingPathComponent("tree").path
+        try makeFile("tree/a.bin", size: 10)
+        let watcher = DirectoryWatcher()
+        let delivered = expectation(description: "onChange")
+        var subtrees: [String] = []
+        watcher.onChange = { _, _, roots in subtrees = roots; delivered.fulfill() }
+        // What the FSEvents callback builds from a MustScanSubDirs / dropped-event flag.
+        watcher.handle([(path: tree + "/", isFile: false, rescan: true)])
+        wait(for: [delivered], timeout: 5)
+        XCTAssertEqual(subtrees, [tree], "trailing slash stripped, rescan root reported")
+    }
+
+    func testRescanEventRefreshesWatchedListingsAndSizes() throws {
+        try makeFile("tree/child/grand/f.bin", size: 100)
+        let child = root.appendingPathComponent("tree/child").path
+        let grand = child + "/grand"
+        let store = DirectoryStore.shared, sizer = FolderSizer.shared
+        store.beginWatching(child)
+        addTeardownBlock { store.endWatching(child) }
+        let listing = store.loadNow(child)
+        XCTAssertEqual(listing.items.map(\.name), ["grand"])
+        let sized = expectation(description: "sized")
+        sizer.size(of: grand) { _ in sized.fulfill() }
+        wait(for: [sized], timeout: 10)
+        XCTAssertNotNil(sizer.cached(grand))
+
+        // Nothing on disk changes, so only the rescan can re-read the listing or re-request the size.
+        let readBefore = listing.lastRead
+        let resized = expectation(forNotification: DirectoryStore.folderContentsDidChange, object: store) { note in
+            (note.userInfo?["paths"] as? Set<String>)?.contains(grand) == true
+        }
+        store.watcher.handle([(path: root.appendingPathComponent("tree").path, isFile: false, rescan: true)])
+        wait(for: [resized], timeout: 5)
+        XCTAssertNil(sizer.cached(grand), "a cached size under the rescan root survived")
+        let deadline = Date().addingTimeInterval(5)
+        while listing.lastRead == readBefore && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        XCTAssertGreaterThan(listing.lastRead, readBefore, "the watched listing under the root was not re-read")
     }
 }
