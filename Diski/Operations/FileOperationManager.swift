@@ -18,6 +18,9 @@ final class FileOperationManager: NSObject, ConflictResolving {
     var conflictPresenter: ((_ source: URL, _ existing: URL, _ operation: FileOperation,
                              _ completion: @escaping (ConflictResolution, Bool) -> Void) -> Void)?
 
+    /// Replaces the error alert; tests set it because `NSAlert.runModal()` would hang them.
+    var errorPresenter: ((_ errors: [String], _ title: String) -> Void)?
+
     var activeOperations: [FileOperation] { operations.filter { !$0.state.isDone } }
 
     struct OperationError: LocalizedError {
@@ -57,13 +60,14 @@ final class FileOperationManager: NSObject, ConflictResolving {
         workQueue.async {
             engine.run()
             let created = engine.created
+            let undoCreated = engine.undoCreated
             let moved = engine.moved
             let replaced = engine.replaced
             let errors = engine.errors
             DispatchQueue.main.async {
-                operation.replacedItems = replaced
+                TrashLedger.shared.record(replaced)
                 self.finish(operation, results: created, errors: errors)
-                self.registerUndo(for: operation, moved: moved)
+                self.registerUndo(for: operation, created: undoCreated, moved: moved, replaced: replaced)
             }
         }
         return operation
@@ -262,6 +266,13 @@ final class FileOperationManager: NSObject, ConflictResolving {
         let target = parent.appendingPathComponent(newName)
         // Case-only renames refer to the same file on case-insensitive volumes.
         let caseOnly = newName.lowercased() == oldName.lowercased()
+        // rename(2) silently replaces: on a case-sensitive volume "foo" -> "Foo" would clobber a separate "Foo".
+        if caseOnly {
+            var from = stat(), to = stat()
+            if lstat(url.path, &from) == 0, lstat(target.path, &to) == 0, (from.st_dev, from.st_ino) != (to.st_dev, to.st_ino) {
+                throw OperationError(message: "The name “\(newName)” is already taken. Please choose a different name.")
+            }
+        }
         let result = caseOnly ? Darwin.rename(url.path, target.path) : renamex_np(url.path, target.path, CopyEngine.renameExcl)
         if result != 0 {
             if errno == EEXIST {
@@ -292,10 +303,13 @@ final class FileOperationManager: NSObject, ConflictResolving {
             throw OperationError(message: "The folder couldn’t be created: \(String(cString: strerror(errno))).")
         }
         var movedPairs: [(from: URL, to: URL)] = []
+        var failures: [String] = []
         for item in items {
             let target = folder.appendingPathComponent(item.lastPathComponent)
             if renamex_np(item.path, target.path, CopyEngine.renameExcl) == 0 {
                 movedPairs.append((item, target))
+            } else {
+                failures.append("“\(item.lastPathComponent)” couldn’t be moved: \(String(cString: strerror(errno))).")
             }
         }
         undoManager.registerUndo(withTarget: self) { manager in
@@ -304,6 +318,7 @@ final class FileOperationManager: NSObject, ConflictResolving {
         }
         undoManager.setActionName("New Folder")
         refresh([directory])
+        if !failures.isEmpty { presentErrors(failures, title: "Some items couldn’t be moved into the new folder.") }
         return folder
     }
 
@@ -389,26 +404,39 @@ final class FileOperationManager: NSObject, ConflictResolving {
 
     func makeSymlinks(for urls: [URL]) {
         var created: [URL] = []
+        var failures: [String] = []
         for url in urls {
             let directory = url.deletingLastPathComponent()
             let name = CopyEngine.uniqueName(for: url.lastPathComponent + " link", in: directory.path,
                                              style: .number, splitExtension: false)
             let link = directory.appendingPathComponent(name)
-            if symlink(url.path, link.path) == 0 { created.append(link) }
+            if symlink(url.path, link.path) == 0 {
+                created.append(link)
+            } else {
+                failures.append("“\(url.lastPathComponent)” couldn’t be linked: \(String(cString: strerror(errno))).")
+            }
         }
         if !created.isEmpty {
             undoManager.registerUndo(withTarget: self) { manager in manager.trashNow(created) }
             undoManager.setActionName("Make Symbolic Link")
             refresh(created.map { $0.deletingLastPathComponent() })
         }
+        if !failures.isEmpty { presentErrors(failures, title: "Some links couldn’t be created.") }
     }
 
-    /// Moves items back to where they were (undo of a same-volume move).
+    /// Moves items back to where they were (undo of a move). Same-volume pairs are renamed back right away;
+    /// cross-volume pairs (EXDEV) go through the async `move` (conflicts, progress, errors); the rest are reported.
     func moveBackNow(_ pairs: [(from: URL, to: URL)]) {
         var reverted: [(from: URL, to: URL)] = []
+        var crossVolume: [(from: URL, to: URL)] = []
+        var failures: [String] = []
         for pair in pairs {
             if renamex_np(pair.to.path, pair.from.path, CopyEngine.renameExcl) == 0 {
                 reverted.append((pair.to, pair.from))
+            } else if errno == EXDEV {
+                crossVolume.append(pair)
+            } else {
+                failures.append("“\(pair.to.lastPathComponent)” couldn’t be moved back: \(String(cString: strerror(errno))).")
             }
         }
         if !reverted.isEmpty {
@@ -416,6 +444,12 @@ final class FileOperationManager: NSObject, ConflictResolving {
             undoManager.setActionName("Move")
         }
         refresh(pairs.flatMap { [$0.from.deletingLastPathComponent(), $0.to.deletingLastPathComponent()] })
+        // shortcut: cross-volume move-back is async, so a replaced original is put back beside it as “name 2”;
+        // chain putBack to the move's completion if users hit it.
+        for (parent, group) in Dictionary(grouping: crossVolume, by: { $0.from.deletingLastPathComponent() }) {
+            move(group.map { $0.to }, to: parent)
+        }
+        if !failures.isEmpty { presentErrors(failures, title: "Some items couldn’t be moved back.") }
     }
 
     // MARK: - Compress
@@ -525,17 +559,18 @@ final class FileOperationManager: NSObject, ConflictResolving {
         }
     }
 
-    private func registerUndo(for operation: FileOperation, moved: [(from: URL, to: URL)]) {
-        guard operation.state != .cancelled else { return }
+    /// `created`/`moved`/`replaced` only ever hold completed items, so this is also right for a cancelled operation.
+    /// Not `private`: tests call it. A merged move registers no undo (its `moved` is empty by design).
+    func registerUndo(for operation: FileOperation, created: [URL], moved: [(from: URL, to: URL)],
+                      replaced: [(original: URL, trashed: URL)]) {
         switch operation.kind {
         case .copy, .duplicate:
-            let created = operation.resultURLs
-            guard !created.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { manager in manager.trashNow(created) }
+            guard !created.isEmpty || !replaced.isEmpty else { return }
+            undoManager.registerUndo(withTarget: self) { m in m.trashNow(created); m.putBackNow(replaced) }
             undoManager.setActionName(operation.kind == .copy ? "Copy" : "Duplicate")
         case .move:
             guard !moved.isEmpty else { return }
-            undoManager.registerUndo(withTarget: self) { manager in manager.moveBackNow(moved) }
+            undoManager.registerUndo(withTarget: self) { m in m.moveBackNow(moved); m.putBackNow(replaced) }
             undoManager.setActionName("Move")
         default:
             break
@@ -575,6 +610,7 @@ final class FileOperationManager: NSObject, ConflictResolving {
     }
 
     private func presentErrors(_ errors: [String], title: String) {
+        if let errorPresenter { errorPresenter(errors, title); return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
@@ -600,11 +636,14 @@ final class TrashLedger {
     private let saveQueue = DispatchQueue(label: "app.diski.trashledger", qos: .utility)
 
     private init() {
+        // Tests must not write the real ledger (or race a running Diski over it); one file per test process.
+        let underTest = NSClassFromString("XCTestCase") != nil
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        let folder = support.appendingPathComponent("Diski", isDirectory: true)
+        let folder = underTest ? FileManager.default.temporaryDirectory : support.appendingPathComponent("Diski", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        fileURL = folder.appendingPathComponent("TrashLedger.json")
+        fileURL = folder.appendingPathComponent(underTest ? "DiskiTests-TrashLedger-\(ProcessInfo.processInfo.processIdentifier).json"
+                                                          : "TrashLedger.json")
         if let data = try? Data(contentsOf: fileURL),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
             entries = decoded

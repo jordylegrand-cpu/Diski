@@ -3,19 +3,29 @@ import XCTest
 
 final class EngineTests: XCTestCase {
     private var root: URL!
+    /// Unique per test; every file that can reach the real Trash carries it so tearDown can find and remove it.
+    private var tok = ""
+    private var createdNames = Set<String>()
 
     override func setUpWithError() throws {
+        tok = UUID().uuidString
         root = FileManager.default.temporaryDirectory.appendingPathComponent("DiskiTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: root)
+        // Undo/replace tests trash into the real ~/.Trash. The test host can't list it (TCC), so remove by exact name:
+        // every name a test created carries `tok`, and a trashed item keeps its name (the token rules out collisions).
+        for name in createdNames where name.contains(tok) {
+            try? FileManager.default.removeItem(at: FileOperationManager.trashURL.appendingPathComponent(name))
+        }
     }
 
     @discardableResult
     private func makeFile(_ relative: String, size: Int = 0, byte: UInt8 = 0x41) throws -> URL {
         let url = root.appendingPathComponent(relative)
+        createdNames.formUnion(relative.split(separator: "/").map(String.init))
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         var bytes = [UInt8](repeating: 0, count: size)
         for i in 0..<size { bytes[i] = byte &+ UInt8(truncatingIfNeeded: i % 251) }
@@ -340,5 +350,293 @@ final class EngineTests: XCTestCase {
         print(String(format: "DISKI-BENCH listing 3000 files: Diski %.2f ms, FileManager %.2f ms (%.1fx)",
                      diski * 1000, foundation * 1000, foundation / diski))
         XCTAssertLessThan(diski, foundation)
+    }
+
+    // MARK: PR-A undo safety
+
+    /// Registers the engine's undo the way `runCopyEngine` does, on a private manager (own UndoManager).
+    private func registerUndo(_ engine: CopyEngine) -> FileOperationManager {
+        let manager = FileOperationManager()
+        manager.undoManager.groupsByEvent = false
+        manager.undoManager.beginUndoGrouping()
+        manager.registerUndo(for: engine.operation, created: engine.undoCreated, moved: engine.moved, replaced: engine.replaced)
+        manager.undoManager.endUndoGrouping()
+        return manager
+    }
+
+    private func fileSize(_ url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int
+    }
+
+    func testUndoOfMergeCopyKeepsPreexistingFiles() throws {
+        let p = "Photos-\(tok)"
+        try makeFile("src/\(p)/a-\(tok)", size: 10)
+        try makeFile("src/\(p)/b-\(tok)", size: 10)
+        try makeFile("src/\(p)/sub/s-\(tok)", size: 10)
+        try makeFile("src/\(p)/fresh-\(tok)/x-\(tok)", size: 10)
+        try makeFile("dst/\(p)/c-\(tok)", size: 10)
+        try makeFile("dst/\(p)/sub/old-\(tok)", size: 10)
+        let dst = root.appendingPathComponent("dst/\(p)")
+        let engine = runEngine(.copy, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertEqual(Set(engine.undoCreated.map { $0.path }),
+                       Set(["a-\(tok)", "b-\(tok)", "sub/s-\(tok)", "fresh-\(tok)"].map { dst.appendingPathComponent($0).path }))
+
+        let manager = registerUndo(engine)
+        XCTAssertTrue(manager.undoManager.canUndo)
+        manager.undoManager.undo()
+        let fm = FileManager.default
+        XCTAssertTrue(fm.fileExists(atPath: dst.appendingPathComponent("c-\(tok)").path))
+        XCTAssertTrue(fm.fileExists(atPath: dst.appendingPathComponent("sub/old-\(tok)").path))
+        XCTAssertTrue(fm.fileExists(atPath: dst.path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("a-\(tok)").path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("sub/s-\(tok)").path))
+        XCTAssertFalse(fm.fileExists(atPath: dst.appendingPathComponent("fresh-\(tok)").path))
+    }
+
+    func testMergedMoveRegistersNoUndo() throws {
+        let p = "Photos-\(tok)"
+        try makeFile("src/\(p)/a-\(tok).jpg", size: 10)
+        try makeFile("dst/\(p)/c-\(tok).jpg", size: 10)
+        let engine = runEngine(.move, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertTrue(engine.moved.isEmpty)
+        let manager = registerUndo(engine)
+        // An empty undo group still reports canUndo == true, so check that no action (and no action name) was registered.
+        XCTAssertEqual(manager.undoManager.undoActionName, "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("dst/\(p)/c-\(tok).jpg").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("dst/\(p)/a-\(tok).jpg").path))
+    }
+
+    func testReplaceKeepsOriginalWhenCopyFails() throws {
+        let name = "doc-\(tok).txt"
+        let source = try makeFile("in/\(name)", size: 10, byte: 1)
+        let existing = try makeFile("out/\(name)", size: 20, byte: 2)
+        let original = try Data(contentsOf: existing)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: source.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path) }
+        let engine = runEngine(.copy, [source], to: root.appendingPathComponent("out"), clones: false, resolver: StubResolver(.replace))
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        XCTAssertTrue(engine.replaced.isEmpty)
+        XCTAssertFalse(engine.errors.isEmpty)
+    }
+
+    func testMergeKeepsExistingFileWhenReplacementFails() throws {
+        let p = "Photos-\(tok)"
+        let source = try makeFile("src/\(p)/a-\(tok).jpg", size: 10, byte: 1)
+        let existing = try makeFile("dst/\(p)/a-\(tok).jpg", size: 20, byte: 2)
+        let original = try Data(contentsOf: existing)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: source.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path) }
+        let engine = runEngine(.copy, [root.appendingPathComponent("src/\(p)")], to: root.appendingPathComponent("dst"),
+                               clones: false, resolver: StubResolver(.merge))
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        XCTAssertTrue(engine.replaced.isEmpty)
+        XCTAssertFalse(engine.errors.isEmpty)
+    }
+
+    func testUndoOfReplaceCopyRestoresOriginal() throws {
+        let name = "doc-\(tok).txt"
+        let source = try makeFile("in/\(name)", size: 10, byte: 1)
+        let target = try makeFile("out/\(name)", size: 20, byte: 2)
+        let engine = runEngine(.copy, [source], to: root.appendingPathComponent("out"), clones: false, resolver: StubResolver(.replace))
+        XCTAssertTrue(engine.errors.isEmpty, "\(engine.errors)")
+        XCTAssertEqual(engine.replaced.count, 1)
+        XCTAssertEqual(fileSize(target), 10)
+
+        let manager = registerUndo(engine)
+        manager.undoManager.undo()
+        XCTAssertEqual(fileSize(target), 20)
+        XCTAssertTrue(manager.undoManager.canRedo)
+        manager.undoManager.redo()
+        XCTAssertEqual(fileSize(target), 10)
+    }
+
+    func testCancelledCopyStillRegistersUndoForCompletedItems() throws {
+        let a = try makeFile("in/a-\(tok).txt", size: 10)
+        let b = try makeFile("in/b-\(tok).txt", size: 10)
+        let out = root.appendingPathComponent("out")
+        try makeFile("out/b-\(tok).txt", size: 20) // conflict on the second item -> Stop
+        let engine = runEngine(.copy, [a, b], to: out, clones: false, resolver: StubResolver(.stop))
+        XCTAssertEqual(engine.created.map { $0.lastPathComponent }, ["a-\(tok).txt"])
+        engine.operation.state = .cancelled
+
+        let manager = registerUndo(engine)
+        XCTAssertTrue(manager.undoManager.canUndo)
+        manager.undoManager.undo()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("a-\(tok).txt").path))
+        XCTAssertEqual(fileSize(out.appendingPathComponent("b-\(tok).txt")), 20)
+    }
+
+    // MARK: PR-B file-operation errors
+
+    /// Creates a 20 MB disk image of `fs`, mounts it outside `root`, and detaches it when the test ends.
+    /// Skips the test if hdiutil can't be run from the test host.
+    private func makeVolume(fs: String) throws -> URL {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("DiskiVol-\(tok)")
+        let image = base.appendingPathComponent("v.dmg")
+        let mount = base.appendingPathComponent("mnt")
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        func hdiutil(_ args: [String]) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            process.arguments = args
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            do { try process.run() } catch { throw XCTSkip("hdiutil couldn’t run: \(error)") }
+            let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                throw XCTSkip("hdiutil \(args.first ?? "") failed (\(process.terminationStatus)): \(output)")
+            }
+        }
+        // Registered before attaching so a failed attach still cleans up the image.
+        addTeardownBlock {
+            let detach = Process()
+            detach.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            detach.arguments = ["detach", "-force", mount.path]
+            detach.standardOutput = FileHandle.nullDevice
+            detach.standardError = FileHandle.nullDevice
+            try? detach.run()
+            detach.waitUntilExit()
+            try? FileManager.default.removeItem(at: base)
+        }
+        try hdiutil(["create", "-fs", fs, "-size", "20m", "-volname", "DiskiVol", image.path])
+        try hdiutil(["attach", "-nobrowse", "-mountpoint", mount.path, image.path])
+        return mount
+    }
+
+    private final class ErrorLog {
+        var calls: [(errors: [String], title: String)] = []
+    }
+
+    private func logErrors(of manager: FileOperationManager) -> ErrorLog {
+        let log = ErrorLog()
+        manager.errorPresenter = { errors, title in log.calls.append((errors, title)) }
+        return log
+    }
+
+    private func exists(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0
+    }
+
+    private func inode(_ url: URL) -> UInt64? {
+        var st = stat()
+        return lstat(url.path, &st) == 0 ? UInt64(st.st_ino) : nil
+    }
+
+    /// Runs `body` and waits for the next operation to finish (its undo is registered in the same main-queue block).
+    private func waitForFinish(_ body: () -> Void) {
+        let finished = XCTNSNotificationExpectation(name: FileOperationManager.didFinish)
+        body()
+        wait(for: [finished], timeout: 20)
+    }
+
+    /// Makes the shared manager safe for a test: no alerts, empty undo stack, both restored afterwards.
+    private func useSharedManager() -> ErrorLog {
+        let manager = FileOperationManager.shared
+        manager.undoManager.removeAllActions()
+        let log = logErrors(of: manager)
+        addTeardownBlock {
+            manager.errorPresenter = nil
+            manager.undoManager.removeAllActions()
+        }
+        return log
+    }
+
+    private func lockDirectory(_ url: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: url.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
+    }
+
+    func testCaseOnlyRenameRefusesToReplaceOtherFile() throws {
+        let vol = try makeVolume(fs: "Case-sensitive APFS")
+        let lower = vol.appendingPathComponent("foo-\(tok)")
+        let upper = vol.appendingPathComponent("Foo-\(tok)")
+        try Data(repeating: 1, count: 10).write(to: lower)
+        try Data(repeating: 2, count: 20).write(to: upper)
+        let manager = FileOperationManager()
+        XCTAssertThrowsError(try manager.rename(lower, to: "Foo-\(tok)")) { error in
+            XCTAssertTrue("\(error.localizedDescription)".contains("already taken"), "\(error)")
+        }
+        XCTAssertEqual(fileSize(lower), 10)
+        XCTAssertEqual(fileSize(upper), 20)
+    }
+
+    func testCaseOnlyRenameStillWorksOnCaseInsensitiveVolume() throws {
+        let vol = try makeVolume(fs: "APFS")
+        let lower = vol.appendingPathComponent("foo-\(tok)")
+        try Data(repeating: 1, count: 10).write(to: lower)
+        let before = inode(lower)
+        let manager = FileOperationManager()
+        let renamed = try manager.rename(lower, to: "Foo-\(tok)")
+        let names = try FileManager.default.contentsOfDirectory(atPath: vol.path).filter { $0.hasSuffix(tok) }
+        XCTAssertEqual(names, ["Foo-\(tok)"])
+        XCTAssertEqual(inode(renamed), before)
+    }
+
+    func testUndoOfCrossVolumeMoveBringsFileBack() throws {
+        let vol = try makeVolume(fs: "APFS")
+        let name = "doc-\(tok).txt"
+        let source = try makeFile("src/\(name)", size: 10)
+        let manager = FileOperationManager.shared
+        let log = useSharedManager()
+
+        waitForFinish { manager.move([source], to: vol) }
+        XCTAssertTrue(exists(vol.appendingPathComponent(name)))
+        XCTAssertFalse(exists(source))
+        XCTAssertEqual(manager.undoManager.undoActionName, "Move")
+
+        waitForFinish { manager.undoManager.undo() }
+        XCTAssertTrue(exists(source), "undo must bring the file back across volumes")
+        XCTAssertFalse(exists(vol.appendingPathComponent(name)))
+        XCTAssertTrue(log.calls.isEmpty, "\(log.calls)")
+        // The async move-back registers itself as a new "Move" undo.
+        XCTAssertTrue(manager.undoManager.canUndo)
+        XCTAssertEqual(manager.undoManager.undoActionName, "Move")
+    }
+
+    func testMoveBackReportsFailure() throws {
+        let name = "a-\(tok)"
+        let moved = try makeFile("moved/\(name)", size: 10)
+        let original = try makeFile("orig/\(name)", size: 20) // something new took the original place
+        let manager = FileOperationManager()
+        let log = logErrors(of: manager)
+        manager.moveBackNow([(from: original, to: moved)])
+        XCTAssertEqual(log.calls.count, 1)
+        XCTAssertEqual(log.calls.first?.title, "Some items couldn’t be moved back.")
+        XCTAssertTrue(log.calls.first?.errors.first?.contains(name) ?? false, "\(log.calls)")
+        XCTAssertEqual(fileSize(moved), 10)
+        XCTAssertEqual(fileSize(original), 20)
+        XCTAssertEqual(manager.undoManager.undoActionName, "")
+    }
+
+    func testSymlinkFailureIsReported() throws {
+        let file = try makeFile("ro/f-\(tok)", size: 1)
+        try lockDirectory(file.deletingLastPathComponent())
+        let manager = FileOperationManager()
+        let log = logErrors(of: manager)
+        manager.makeSymlinks(for: [file])
+        XCTAssertEqual(log.calls.count, 1)
+        XCTAssertEqual(log.calls.first?.title, "Some links couldn’t be created.")
+        XCTAssertTrue(log.calls.first?.errors.first?.contains("f-\(tok)") ?? false, "\(log.calls)")
+    }
+
+    func testNewFolderWithItemsReportsFailedMove() throws {
+        let good = try makeFile("in/good-\(tok)", size: 1)
+        let bad = try makeFile("locked/bad-\(tok)", size: 1) // can't be moved out of a read-only folder
+        try lockDirectory(bad.deletingLastPathComponent())
+        let manager = FileOperationManager()
+        let log = logErrors(of: manager)
+        let folder = try manager.newFolder(in: good.deletingLastPathComponent(), containing: [good, bad])
+        XCTAssertTrue(exists(folder.appendingPathComponent(good.lastPathComponent)))
+        XCTAssertTrue(exists(bad))
+        XCTAssertEqual(log.calls.count, 1)
+        XCTAssertEqual(log.calls.first?.title, "Some items couldn’t be moved into the new folder.")
+        XCTAssertTrue(log.calls.first?.errors.first?.contains("bad-\(tok)") ?? false, "\(log.calls)")
     }
 }
